@@ -5,7 +5,7 @@ use super::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 use super::build::{CodeBlock, SubBandType};
 use super::codestream::CodeBlockStyle;
 use super::decode::{DecompositionStorage, TileDecodeContext};
-use crate::error::{DecodingError, Result, bail};
+use crate::error::{DecodeError, Result, bail};
 use crate::reader::BitReader;
 
 pub(crate) fn decode(
@@ -32,7 +32,7 @@ pub(crate) fn decode(
         &mut tile_ctx.bit_plane_decode_context,
         &mut tile_ctx.bit_plane_decode_buffers,
     )
-    .ok_or(DecodingError::CodeBlockDecodeFailure)?;
+    .ok_or(DecodeError::Malformed)?;
 
     Ok(())
 }
@@ -427,7 +427,7 @@ impl BitPlaneDecodeContext {
         self.bitplanes = if strict {
             total_bitplanes
                 .checked_sub(code_block.missing_bit_planes)
-                .ok_or(DecodingError::InvalidBitplaneCount)?
+                .ok_or(DecodeError::Malformed)?
         } else {
             total_bitplanes.saturating_sub(code_block.missing_bit_planes)
         };
@@ -439,7 +439,7 @@ impl BitPlaneDecodeContext {
         };
 
         if self.max_coding_passes < code_block.number_of_coding_passes && strict {
-            bail!(DecodingError::TooManyCodingPasses);
+            bail!(DecodeError::Malformed);
         }
 
         Ok(())

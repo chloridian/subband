@@ -3,7 +3,7 @@ use super::rect::IntRect;
 use super::tag_tree::TagTree;
 use super::tile::{ResolutionTile, Tile};
 use crate::cancel::Cancel;
-use crate::error::{DecodingError, Result, ValidationError};
+use crate::error::{DecodeError, Result};
 use core::iter;
 use core::ops::Range;
 use std::vec;
@@ -32,12 +32,10 @@ fn build_decompositions(
             .num_resolution_levels()
             .checked_sub(skipped_resolution_levels)
             .filter(|r| *r > 0)
-            .ok_or(ValidationError::InvalidComponentMetadata)?;
+            .ok_or(DecodeError::Malformed)?;
         let top_resolution = ResolutionTile::new(component_tile, decoded_resolutions - 1);
-        component_samples.push(
-            usize::try_from(top_resolution.rect.area())
-                .map_err(|_| ValidationError::ImageTooLarge)?,
-        );
+        component_samples
+            .push(usize::try_from(top_resolution.rect.area()).map_err(|_| DecodeError::TooLarge)?);
     }
     let max_coefficients = component_samples.iter().copied().max().unwrap_or(0);
 
@@ -64,13 +62,13 @@ fn build_decompositions(
             let precincts = build_precincts(resolution_tile, sub_band_rect, tile, storage, cancel)?;
 
             let added_coefficients = if resolution_tile.resolution < decoded_resolutions {
-                usize::try_from(sub_band_rect.area()).map_err(|_| ValidationError::ImageTooLarge)?
+                usize::try_from(sub_band_rect.area()).map_err(|_| DecodeError::TooLarge)?
             } else {
                 0
             };
             let next_coefficient_counter = coefficient_counter
                 .checked_add(added_coefficients)
-                .ok_or(ValidationError::ImageTooLarge)?;
+                .ok_or(DecodeError::TooLarge)?;
             let coefficients = coefficient_counter..next_coefficient_counter;
             coefficient_counter = next_coefficient_counter;
 
@@ -124,10 +122,7 @@ fn build_precincts(
 ) -> Result<Range<usize>> {
     let start = storage.precincts.len();
 
-    for precinct_data in resolution_tile
-        .precincts()
-        .ok_or(DecodingError::InvalidPrecinct)?
-    {
+    for precinct_data in resolution_tile.precincts().ok_or(DecodeError::Malformed)? {
         cancel.check()?;
 
         let precinct_rect = precinct_data.rect;

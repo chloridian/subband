@@ -1,4 +1,4 @@
-use crate::error::{MarkerError, Result, bail};
+use crate::error::{DecodeError, Result, bail};
 use core::fmt::Debug;
 
 #[derive(Debug, Clone)]
@@ -160,12 +160,12 @@ impl<'a> BitReader<'a> {
 
     #[inline]
     pub(crate) fn read_marker(&mut self) -> Result<u8> {
-        if self.peek_byte().ok_or(MarkerError::Invalid)? != 0xFF {
-            bail!(MarkerError::Invalid);
+        if self.peek_byte().ok_or(DecodeError::Malformed)? != 0xFF {
+            bail!(DecodeError::Malformed);
         }
 
         self.read_byte().unwrap();
-        Ok(self.read_byte().ok_or(MarkerError::Invalid)?)
+        self.read_byte().ok_or(DecodeError::Malformed)
     }
 
     #[inline]

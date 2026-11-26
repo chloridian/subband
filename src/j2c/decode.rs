@@ -10,7 +10,7 @@ use super::tag_tree::TagNode;
 use super::tile::{ComponentTile, ResolutionTile, Tile};
 use super::{ComponentData, bitplane, build, idwt, mct, segment, tile};
 use crate::cancel::Cancel;
-use crate::error::{DecodingError, Result, TileError, ValidationError, bail};
+use crate::error::{DecodeError, Result, bail};
 use crate::j2c::segment::MAX_BITPLANE_COUNT;
 use crate::math::SimdBuffer;
 use crate::reader::BitReader;
@@ -26,7 +26,7 @@ pub(crate) fn decode<'a>(
     let tiles = tile::parse(&mut reader, header)?;
 
     if tiles.is_empty() {
-        bail!(TileError::Invalid);
+        bail!(DecodeError::Malformed);
     }
 
     ctx.reset(header, &tiles[0], cancel)?;
@@ -83,7 +83,7 @@ impl DecoderContext<'_> {
         self.channel_data.clear();
         let sample_count = (header.size_data.image_width() as usize)
             .checked_mul(header.size_data.image_height() as usize)
-            .ok_or(ValidationError::ImageTooLarge)?;
+            .ok_or(DecodeError::TooLarge)?;
         // TODO: SIMD Buffers should be reused across runs!
         for _ in &initial_tile.component_infos {
             cancel.check()?;
@@ -311,10 +311,10 @@ fn decode_sub_band_bitplanes(
             .checked_add(exponent)
             .and_then(|x| x.checked_sub(1))
             .and_then(|x| x.checked_add(component_info.roi_shift as u16))
-            .ok_or(DecodingError::InvalidBitplaneCount)?;
+            .ok_or(DecodeError::Malformed)?;
 
         if num_bitplanes > MAX_BITPLANE_COUNT as u16 {
-            bail!(DecodingError::TooManyBitplanes);
+            bail!(DecodeError::Malformed);
         }
 
         num_bitplanes as u8

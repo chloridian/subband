@@ -3,6 +3,8 @@ use crate::reader::BitReader;
 pub(crate) const JP2_SIGNATURE: u32 = 0x6A502020;
 pub(crate) const FILE_TYPE: u32 = 0x66747970;
 pub(crate) const JP2_HEADER: u32 = 0x6A703268;
+pub(crate) const PALETTE: u32 = 0x70636C72;
+pub(crate) const COMPONENT_MAPPING: u32 = 0x636D6170;
 pub(crate) const CONTIGUOUS_CODESTREAM: u32 = 0x6A703263;
 
 pub(crate) struct Jp2Box<'a> {
