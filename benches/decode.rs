@@ -1,56 +1,26 @@
-use core::fmt;
-
 use divan::{Bencher, black_box};
 use subband::{DecodeSettings, DecoderContext, Image};
 
-macro_rules! fixture {
-    ($name:literal) => {
-        Fixture {
-            name: $name,
-            bytes: include_bytes!(concat!("fixtures/", $name, ".j2c")),
-        }
-    };
-}
+use crate::{FIXTURES, Fixture, LAYERED};
 
 const DISCARD_LEVELS: &[u32] = &[0, 1, 2, 5];
+const REUSED_LEVELS: &[u32] = &[0, 2];
 const PARTIAL_SIZES: &[usize] = &[600, 2000, 8192];
-
-const FIXTURES: &[Fixture] = &[
-    fixture!("plywood"),
-    fixture!("terrain-grass"),
-    fixture!("water-normal"),
-    fixture!("profile-picture"),
-    fixture!("alpha-gradient"),
-    fixture!("white"),
-    fixture!("gray-alpha"),
-    fixture!("gray-4096"),
-    fixture!("sculpt-64"),
-    fixture!("rgb-1024-rlcp"),
-    fixture!("rgba-1024x512-rlcp"),
-    fixture!("rgba-1024-lrcp"),
-    fixture!("rgba-2048-lossy"),
-];
-
-const LAYERED: &[Fixture] = &[
-    fixture!("plywood"),
-    fixture!("rgb-1024-rlcp"),
-    fixture!("rgba-1024-lrcp"),
-];
-
-struct Fixture {
-    name: &'static str,
-    bytes: &'static [u8],
-}
-
-impl fmt::Display for Fixture {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name)
-    }
-}
 
 #[divan::bench(args = FIXTURES, consts = DISCARD_LEVELS)]
 fn discard<const DISCARD: u32>(bencher: Bencher<'_, '_>, fixture: &Fixture) {
     run(bencher, fixture.bytes, true, DISCARD);
+}
+
+#[divan::bench(args = FIXTURES, consts = REUSED_LEVELS)]
+fn reused<const DISCARD: u32>(bencher: Bencher<'_, '_>, fixture: &Fixture) {
+    let settings = settings(fixture.bytes, true, DISCARD);
+    let image = Image::from_codestream(fixture.bytes, &settings).expect("fixture parses");
+    let mut ctx = DecoderContext::default();
+    bencher.bench_local(|| {
+        let decoded = image.decode(&mut ctx).expect("fixture decodes");
+        black_box(decoded.data_u8().expect("not cancelled"));
+    });
 }
 
 #[divan::bench(args = LAYERED, consts = PARTIAL_SIZES)]
@@ -60,19 +30,23 @@ fn partial<const BYTES: usize>(bencher: Bencher<'_, '_>, fixture: &Fixture) {
 }
 
 fn run(bencher: Bencher<'_, '_>, data: &[u8], strict: bool, discard: u32) {
-    let image = Image::from_codestream(data, &DecodeSettings::default()).expect("fixture parses");
-    let settings = DecodeSettings {
-        strict,
-        target_resolution: Some((
-            image.width().div_ceil(1 << discard),
-            image.height().div_ceil(1 << discard),
-        )),
-        ..DecodeSettings::default()
-    };
+    let settings = settings(data, strict, discard);
     bencher.bench_local(|| {
         let image = Image::from_codestream(black_box(data), &settings).expect("fixture parses");
         let mut ctx = DecoderContext::default();
         let decoded = image.decode(&mut ctx).expect("fixture decodes");
         black_box(decoded.data_u8().expect("not cancelled"));
     });
+}
+
+fn settings(data: &[u8], strict: bool, discard: u32) -> DecodeSettings {
+    let image = Image::from_codestream(data, &DecodeSettings::default()).expect("fixture parses");
+    DecodeSettings {
+        strict,
+        target_resolution: Some((
+            image.width().div_ceil(1 << discard),
+            image.height().div_ceil(1 << discard),
+        )),
+        ..DecodeSettings::default()
+    }
 }
