@@ -291,7 +291,7 @@ fn resolve_segments(
     Some(())
 }
 
-fn segment_idx_for_bypass(pass_idx: u8) -> u8 {
+pub(crate) fn segment_idx_for_bypass(pass_idx: u8) -> u8 {
     if pass_idx < 10 {
         0
     } else {

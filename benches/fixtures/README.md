@@ -1,4 +1,4 @@
-Benchmark codestreams. `decode::discard` decodes every fixture at discard levels 0, 1, 2 and 5. `decode::partial` decodes the first 600, 2000 and 8192 bytes of `plywood.j2c`, `rgb-1024-rlcp.j2c` and `rgba-1024-lrcp.j2c` at discard level 2, as a viewer does while a fetch is still arriving.
+Benchmark codestreams. `decode::discard` decodes every fixture at discard levels 0, 1, 2 and 5. `decode::partial` decodes the first 600, 2000 and 8192 bytes of `plywood.j2c`, `rgb-1024-rlcp.j2c` and `rgba-1024-lrcp.j2c` at discard level 2, as a viewer does while a fetch is still arriving. `decode::reused` decodes every fixture at discard levels 0 and 2 with one `DecoderContext` kept across runs. `header::parse` and `header::inspect` read every fixture's header without decoding it.
 
 ## Second Life defaults
 
@@ -6,8 +6,8 @@ Default textures that every Second Life viewer uses, kept as the asset server or
 
 | Fixture | Texture | Size | Encoding |
 |---|---|---|---|
-| `plywood.j2c` | Default object texture `89556747-24cb-43ed-920b-47caed15465f` | 512×512 RGB | 9/7 with MCT, LRCP, PLT, 5 layers |
-| `terrain-grass.j2c` | Grass terrain detail `63338ede-0037-c4fd-855b-015d77112fc8` | 512×512 RGB | 9/7 with MCT, LRCP, PLT, 5 layers |
+| `plywood.j2c` | Default object texture `89556747-24cb-43ed-920b-47caed15465f` | 512×512 RGB | 9/7 with MCT, LRCP, 5 layers |
+| `terrain-grass.j2c` | Grass terrain detail `63338ede-0037-c4fd-855b-015d77112fc8` | 512×512 RGB | 9/7 with MCT, LRCP, 5 layers |
 | `water-normal.j2c` | Default water normal map `822ded49-9a6c-f61c-cb89-6df54f42cdf4` | 256×256 RGB | 9/7 with MCT, LRCP, 4 layers |
 | `white.j2c` | Blank white `5748decc-f629-461c-9a36-a35a221fe21f` | 32×32 RGB | 9/7 with MCT, 1 layer |
 | `profile-picture.j2c` | Viewer skin `default_profile_picture.j2c` | 64×64 RGB | 9/7 with MCT, LRCP, 2 layers |

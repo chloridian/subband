@@ -8,7 +8,7 @@ use subband::{DecodeSettings, DecoderContext, Image};
 let data = std::fs::read("texture.j2c").unwrap();
 let settings = DecodeSettings {
     strict: true,
-    target_resolution: Some((512, 512)),
+    discard: 1,
     ..DecodeSettings::default()
 };
 let image = Image::from_codestream(&data, &settings).unwrap();

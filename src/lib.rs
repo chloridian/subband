@@ -15,7 +15,7 @@ pub use cancel::{CancelCheck, CancelHandle};
 
 use crate::math::{Level, Simd, dispatch};
 pub use error::{Cancelled, DecodeError, Result};
-pub use j2c::{ComponentData, DecoderContext};
+pub use j2c::{ComponentData, DecoderContext, Inspection};
 pub use jp2::DecodedImage;
 
 mod j2c;
@@ -32,7 +32,8 @@ const DEFAULT_MAX_OUTPUT: usize = 64 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct DecodeSettings {
     pub strict: bool,
-    pub target_resolution: Option<(u32, u32)>,
+    pub discard: u8,
+    pub max_layers: Option<u8>,
     pub cancel: Option<CancelHandle>,
     pub max_edge: u32,
     pub max_input: usize,
@@ -43,7 +44,8 @@ impl Default for DecodeSettings {
     fn default() -> Self {
         Self {
             strict: false,
-            target_resolution: None,
+            discard: 0,
+            max_layers: None,
             cancel: None,
             max_edge: DEFAULT_MAX_EDGE,
             max_input: DEFAULT_MAX_INPUT,
@@ -93,6 +95,14 @@ impl<'a> Image<'a> {
         self.header.size_data.image_height()
     }
 
+    pub fn levels(&self) -> u8 {
+        self.header.levels
+    }
+
+    pub fn layers(&self) -> u8 {
+        self.header.global_coding_style.num_layers
+    }
+
     pub fn decode<'b>(
         &'a self,
         decoder_context: &'b mut DecoderContext<'a>,
@@ -123,6 +133,18 @@ impl DecodedImage<'_> {
 
     pub fn store_u8_into(&self, buf: &mut [u8]) -> result::Result<(), Cancelled> {
         interleave_and_convert(self, buf)
+    }
+}
+
+pub fn inspect(data: &[u8], settings: &DecodeSettings) -> Result<Inspection> {
+    if data.len() > settings.max_input {
+        return Err(DecodeError::TooLarge);
+    }
+
+    if data.starts_with(CODESTREAM_MAGIC) {
+        j2c::inspect(data, settings)
+    } else {
+        Err(DecodeError::Malformed)
     }
 }
 

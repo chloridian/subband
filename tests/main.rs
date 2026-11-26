@@ -2,6 +2,7 @@ mod cancel;
 mod code_blocks;
 mod codestream;
 mod errors;
+mod inspect;
 mod jp2;
 mod mct;
 mod packets;

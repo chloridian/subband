@@ -52,7 +52,7 @@ fn reduced_below_tile_levels() {
     check_error(
         "codestream_tile_cod_fewer_levels",
         DecodeSettings {
-            target_resolution: Some((32, 24)),
+            discard: 2,
             ..Default::default()
         },
         "malformed codestream",

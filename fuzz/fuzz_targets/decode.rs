@@ -6,9 +6,15 @@ use subband::{DecodeSettings, DecoderContext, Image};
 fn run(data: &[u8], strict: bool) {
     let settings = DecodeSettings {
         strict,
-        target_resolution: Some((512, 512)),
+        discard: 1,
         ..DecodeSettings::default()
     };
+    if let Ok(info) = subband::inspect(data, &settings) {
+        for d in 0..=info.levels().saturating_add(1) {
+            let _ = info.bytes_for(d, None);
+            let _ = info.bytes_for(d, Some(1));
+        }
+    }
     let Ok(image) = Image::from_codestream(data, &settings) else {
         return;
     };
