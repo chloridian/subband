@@ -25,11 +25,11 @@ pub(crate) fn decode<'a>(
     let mut reader = BitReader::new(data);
     let tiles = tile::parse(&mut reader, header)?;
 
-    if tiles.is_empty() {
+    let Some(first_tile) = tiles.first() else {
         bail!(DecodeError::Malformed);
-    }
+    };
 
-    ctx.reset(header, &tiles[0], cancel)?;
+    ctx.reset(header, first_tile, cancel)?;
 
     for tile in &tiles {
         cancel.check()?;
@@ -47,10 +47,10 @@ pub(crate) fn decode<'a>(
         )?;
     }
 
-    if tiles[0].mct {
+    if first_tile.mct {
         mct::apply_inverse(
             &mut ctx.channel_data,
-            &tiles[0].component_infos,
+            &first_tile.component_infos,
             header,
             cancel,
         )?;
@@ -108,12 +108,25 @@ fn decode_tile<'a, 'b>(
     build::build(tile, storage, header.skipped_resolution_levels, cancel)?;
     segment::parse(tile, progression_iterator, header, storage, cancel)?;
 
-    for (idx, component_info) in header.component_infos.iter().enumerate() {
+    for ((idx, component_info), channel) in header
+        .component_infos
+        .iter()
+        .enumerate()
+        .zip(channel_data.iter_mut())
+    {
         cancel.check()?;
 
         if idx > 0 {
-            let count = storage.tile_decompositions[idx].coefficient_count;
-            storage.coefficients[..count].fill(0.0);
+            let count = storage
+                .tile_decompositions
+                .get(idx)
+                .ok_or(DecodeError::Malformed)?
+                .coefficient_count;
+            storage
+                .coefficients
+                .get_mut(..count)
+                .ok_or(DecodeError::Malformed)?
+                .fill(0.0);
         }
         decode_component_tile_bit_planes(idx, tile, tile_ctx, storage, header, cancel)?;
         idwt::apply(
@@ -124,14 +137,7 @@ fn decode_tile<'a, 'b>(
             component_info.wavelet_transform(),
             cancel,
         )?;
-        store(
-            tile,
-            header,
-            tile_ctx,
-            &mut channel_data[idx],
-            component_info,
-            cancel,
-        )?;
+        store(tile, header, tile_ctx, channel, component_info, cancel)?;
     }
 
     Ok(())
@@ -157,7 +163,10 @@ impl TileDecompositions {
                 self.first_ll_sub_band,
             ]
         } else {
-            decompositions[self.decompositions.clone()][resolution as usize - 1].sub_bands
+            decompositions
+                .get(self.decompositions.clone())
+                .and_then(|d| d.get(resolution as usize - 1))
+                .map_or([0; 3], |d| d.sub_bands)
         };
 
         SubBandIter {
@@ -185,10 +194,8 @@ impl Iterator for SubBandIter {
             } else {
                 Some(self.indices[0])
             }
-        } else if self.next_idx >= self.indices.len() {
-            None
         } else {
-            Some(self.indices[self.next_idx])
+            self.indices.get(self.next_idx).copied()
         };
 
         self.next_idx += 1;
@@ -243,10 +250,16 @@ fn decode_component_tile_bit_planes<'a>(
     header: &Header,
     cancel: Cancel<'_>,
 ) -> Result<()> {
-    let component_info = &tile.component_infos[component_idx];
+    let component_info = tile
+        .component_infos
+        .get(component_idx)
+        .ok_or(DecodeError::Malformed)?;
 
     for resolution in 0..component_info.num_resolution_levels() - header.skipped_resolution_levels {
-        let tile_composition = &storage.tile_decompositions[component_idx];
+        let tile_composition = storage
+            .tile_decompositions
+            .get(component_idx)
+            .ok_or(DecodeError::Malformed)?;
         let sub_band_iter = tile_composition.sub_band_iter(resolution, &storage.decompositions);
 
         for sub_band_idx in sub_band_iter {
@@ -274,7 +287,10 @@ fn decode_sub_band_bitplanes(
     header: &Header,
     cancel: Cancel<'_>,
 ) -> Result<()> {
-    let sub_band = &storage.sub_bands[sub_band_idx];
+    let sub_band = storage
+        .sub_bands
+        .get(sub_band_idx)
+        .ok_or(DecodeError::Malformed)?;
 
     let quantised =
         component_info.quantization_info.quantization_style != QuantizationStyle::NoQuantization;
@@ -316,16 +332,18 @@ fn decode_sub_band_bitplanes(
         num_bitplanes as u8
     };
 
-    for precinct in sub_band
-        .precincts
-        .clone()
-        .map(|idx| &storage.precincts[idx])
-    {
-        for code_block in precinct
-            .code_blocks
-            .clone()
-            .map(|idx| &storage.code_blocks[idx])
-        {
+    for precinct_idx in sub_band.precincts.clone() {
+        let precinct = storage
+            .precincts
+            .get(precinct_idx)
+            .ok_or(DecodeError::Malformed)?;
+
+        for code_block_idx in precinct.code_blocks.clone() {
+            let code_block = storage
+                .code_blocks
+                .get(code_block_idx)
+                .ok_or(DecodeError::Malformed)?;
+
             cancel.check()?;
 
             bitplane::decode(
@@ -341,13 +359,18 @@ fn decode_sub_band_bitplanes(
             let x_offset = code_block.rect.x0 - sub_band.rect.x0;
             let y_offset = code_block.rect.y0 - sub_band.rect.y0;
 
-            let base_store = &mut storage.coefficients[sub_band.coefficients.clone()];
+            let base_store = storage
+                .coefficients
+                .get_mut(sub_band.coefficients.clone())
+                .ok_or(DecodeError::Malformed)?;
             let mut base_idx = (y_offset * sub_band.rect.width()) as usize + x_offset as usize;
 
             for (coefficients, coefficient_states) in
                 tile_ctx.bit_plane_decode_context.coefficient_rows()
             {
-                let out_row = &mut base_store[base_idx..];
+                let out_row = base_store
+                    .get_mut(base_idx..)
+                    .ok_or(DecodeError::Malformed)?;
 
                 for ((output, coefficient), coefficient_state) in
                     out_row.iter_mut().zip(coefficients).zip(coefficient_states)
@@ -419,7 +442,10 @@ fn store<'a>(
     for (input_row, output_row) in input_row_iter.zip(output_row_iter) {
         cancel.check()?;
 
-        let output_row = &mut output_row[resolution_tile.rect.x0 as usize..][..input_row.len()];
+        let output_row = output_row
+            .get_mut(resolution_tile.rect.x0 as usize..)
+            .and_then(|r| r.get_mut(..input_row.len()))
+            .ok_or(DecodeError::Malformed)?;
         output_row.copy_from_slice(input_row);
     }
 
