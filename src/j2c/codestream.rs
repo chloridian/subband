@@ -1,5 +1,5 @@
-use alloc::vec;
-use alloc::vec::Vec;
+use std::vec;
+use std::vec::Vec;
 
 use super::DecodeSettings;
 use super::build::SubBandType;

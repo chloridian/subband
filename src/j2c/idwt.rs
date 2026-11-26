@@ -1,5 +1,5 @@
-use alloc::vec;
-use alloc::vec::Vec;
+use std::vec;
+use std::vec::Vec;
 
 use super::build::{Decomposition, SubBand};
 use super::codestream::WaveletTransform;
@@ -580,7 +580,7 @@ fn filter_53r<S: Simd>(simd: S, signal: &mut impl Lifting<S>) -> Result<()> {
         #[inline(always)]
         |s, left, right| s - ((left + right + 2.0) * 0.25).floor(),
         #[inline(always)]
-        |s, left, right| s - math::floor_f32(math::mul_add(left + right, 0.25, 0.5)),
+        |s, left, right| s - math::mul_add(left + right, 0.25, 0.5).floor(),
     )?;
 
     signal.lift_high(
@@ -588,7 +588,7 @@ fn filter_53r<S: Simd>(simd: S, signal: &mut impl Lifting<S>) -> Result<()> {
         #[inline(always)]
         |s, left, right| s + ((left + right) * 0.5).floor(),
         #[inline(always)]
-        |s, left, right| s + math::floor_f32((left + right) * 0.5),
+        |s, left, right| s + ((left + right) * 0.5).floor(),
     )?;
 
     Ok(())

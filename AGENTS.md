@@ -43,7 +43,7 @@ These rules cover Subband's own history. Upstream contributions follow the secti
 
 ## Checks
 
-Run tests in release mode. CI also checks docs, each feature, the MSRV and `no_std`; see [ci.yml](.github/workflows/ci.yml).
+Run tests in release mode. CI also runs the tests on Windows, macOS and Linux, and checks docs, each feature and unused dependencies; see [ci.yml](.github/workflows/ci.yml). [audit.yml](.github/workflows/audit.yml) checks advisories, licences and sources.
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --release --all-targets -- -D warnings`

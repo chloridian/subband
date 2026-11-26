@@ -1,6 +1,6 @@
 use crate::error::{Cancelled, Result};
-use crate::sync::Arc;
-use alloc::vec::Vec;
+use std::sync::Arc;
+use std::vec::Vec;
 
 /// A check for cancelling decoding.
 pub trait CancelCheck: Send + Sync {
