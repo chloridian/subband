@@ -16,7 +16,7 @@ let settings = DecodeSettings {
     target_resolution: Some((512, 512)),
     ..DecodeSettings::default()
 };
-let image = Image::from_codestream(&data, 3, &settings).unwrap();
+let image = Image::from_codestream(&data, &settings).unwrap();
 
 let mut ctx = DecoderContext::default();
 let decoded = image.decode(&mut ctx).unwrap();

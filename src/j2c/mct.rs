@@ -1,7 +1,7 @@
 use super::ComponentData;
 use super::codestream::{Header, WaveletTransform};
 use crate::cancel::{CHUNK, Cancel};
-use crate::error::{ColorError, Result, bail, err};
+use crate::error::{DecodeError, Result, bail, err};
 use crate::math::{Level, Simd, dispatch, f32x8};
 
 pub(crate) fn apply_inverse(
@@ -12,7 +12,7 @@ pub(crate) fn apply_inverse(
 ) -> Result<()> {
     if components.len() < 3 {
         return if header.strict {
-            err!(ColorError::Mct)
+            err!(DecodeError::Mct)
         } else {
             Ok(())
         };
@@ -26,11 +26,11 @@ pub(crate) fn apply_inverse(
     if transform != component_infos[1].wavelet_transform()
         || component_infos[1].wavelet_transform() != component_infos[2].wavelet_transform()
     {
-        bail!(ColorError::Mct);
+        bail!(DecodeError::Mct);
     }
 
     if s0.container.len() != s1.container.len() || s1.container.len() != s2.container.len() {
-        bail!(ColorError::Mct);
+        bail!(DecodeError::Mct);
     }
 
     for ((c0, c1), c2) in s0

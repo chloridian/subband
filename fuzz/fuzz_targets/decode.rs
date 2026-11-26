@@ -9,7 +9,7 @@ fn run(data: &[u8], strict: bool) {
         target_resolution: Some((512, 512)),
         ..DecodeSettings::default()
     };
-    let Ok(image) = Image::from_codestream(data, 3, &settings) else {
+    let Ok(image) = Image::from_codestream(data, &settings) else {
         return;
     };
     if image.width() > 4096 || image.height() > 4096 {

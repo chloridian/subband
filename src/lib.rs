@@ -14,7 +14,7 @@ let settings = DecodeSettings {
     target_resolution: Some((512, 512)),
     ..DecodeSettings::default()
 };
-let image = Image::from_codestream(&data, 3, &settings).unwrap();
+let image = Image::from_codestream(&data, &settings).unwrap();
 
 let mut ctx = DecoderContext::default();
 let decoded = image.decode(&mut ctx).unwrap();
@@ -58,7 +58,7 @@ pub use cancel::{CancelCheck, CancelHandle};
 
 use crate::math::{Level, Simd, dispatch};
 pub use error::{
-    Cancelled, ColorError, DecodeError, DecodingError, FormatError, MarkerError, Result, TileError,
+    Cancelled, DecodeError, DecodingError, FormatError, MarkerError, Result, TileError,
     ValidationError,
 };
 pub use j2c::{ComponentData, DecoderContext};
@@ -87,8 +87,6 @@ pub struct Image<'a> {
     pub(crate) codestream: &'a [u8],
     pub(crate) header: Header,
     pub(crate) settings: DecodeSettings,
-    pub(crate) has_alpha: bool,
-    pub(crate) color_space: ColorSpace,
 }
 
 impl<'a> Image<'a> {
@@ -97,33 +95,19 @@ impl<'a> Image<'a> {
         if data.starts_with(JP2_MAGIC) {
             jp2::parse(data, settings.clone())
         } else if data.starts_with(CODESTREAM_MAGIC) {
-            j2c::parse(data, settings, None)
+            j2c::parse(data, settings)
         } else {
             err!(FormatError::InvalidSignature)
         }
     }
 
-    /// Try to create a new image from a raw codestream with the given number of colour channels.
-    pub fn from_codestream(
-        data: &'a [u8],
-        color_channels: u8,
-        settings: &DecodeSettings,
-    ) -> Result<Self> {
+    /// Try to create a new image from a raw codestream.
+    pub fn from_codestream(data: &'a [u8], settings: &DecodeSettings) -> Result<Self> {
         if data.starts_with(CODESTREAM_MAGIC) {
-            j2c::parse(data, settings, Some(color_channels))
+            j2c::parse(data, settings)
         } else {
             err!(FormatError::InvalidSignature)
         }
-    }
-
-    /// Whether the image has an alpha channel.
-    pub fn has_alpha(&self) -> bool {
-        self.has_alpha
-    }
-
-    /// The color space of the image.
-    pub fn color_space(&self) -> &ColorSpace {
-        &self.color_space
     }
 
     /// The width of the image.
@@ -134,11 +118,6 @@ impl<'a> Image<'a> {
     /// The height of the image.
     pub fn height(&self) -> u32 {
         self.header.size_data.image_height()
-    }
-
-    /// The original bit depth of the image.
-    pub fn original_bit_depth(&self) -> u8 {
-        8
     }
 
     /// Decode the image and return its decoded components.
@@ -154,51 +133,6 @@ impl<'a> Image<'a> {
             cancel,
         })
     }
-}
-
-pub(crate) fn resolve_alpha_and_color_space(header: &Header) -> Result<(ColorSpace, bool)> {
-    match header.component_infos.len() {
-        1 => Ok((ColorSpace::Gray, false)),
-        2 => Ok((ColorSpace::Gray, true)),
-        3 => Ok((ColorSpace::RGB, false)),
-        4 => Ok((ColorSpace::RGB, true)),
-        _ => err!(FormatError::Unsupported),
-    }
-}
-
-/// The color space of the image.
-#[derive(Debug, Clone)]
-pub enum ColorSpace {
-    /// A grayscale image.
-    Gray,
-    /// An RGB image.
-    RGB,
-}
-
-impl ColorSpace {
-    /// Return the number of expected channels for the color space.
-    pub fn num_channels(&self) -> u8 {
-        match self {
-            Self::Gray => 1,
-            Self::RGB => 3,
-        }
-    }
-}
-
-/// A bitmap storing the decoded result of the image.
-pub struct Bitmap {
-    /// The color space of the image.
-    pub color_space: ColorSpace,
-    /// The interleaved 8-bit samples, with the alpha channel last.
-    pub data: Vec<u8>,
-    /// Whether the image has an alpha channel.
-    pub has_alpha: bool,
-    /// The width of the image.
-    pub width: u32,
-    /// The height of the image.
-    pub height: u32,
-    /// The original bit depth of the image.
-    pub original_bit_depth: u8,
 }
 
 impl DecodedImage<'_> {
