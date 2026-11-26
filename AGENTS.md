@@ -19,7 +19,7 @@ Subband is a pure-Rust JPEG 2000 codec for Second Life textures, for any Second 
 ## References
 
 - Behavior comes from ISO/IEC 15444-1, or is stated as our own choice where the standard says nothing.
-- Compare output and speed with OpenJPEG, Grok and the `j2k` crate, and read Kakadu's documentation. Never run Kakadu. Never copy code from any of them: they inform a choice, they never justify one.
+- Compare output and speed with OpenJPEG, Grok and j2k, and read Kakadu's documentation. Never run Kakadu. Never copy code from any of them: they inform a choice, they never justify one.
 - Add a JPEG 2000 capability when Second Life content uses it or when it makes a viewer's texture work faster.
 
 ## Structure
