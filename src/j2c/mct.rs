@@ -21,11 +21,13 @@ pub(crate) fn apply_inverse(
     let (s, _) = components.split_at_mut(3);
     let [s0, s1, s2] = s else { unreachable!() };
 
-    let transform = component_infos[0].wavelet_transform();
+    let [c0, c1, c2, ..] = component_infos else {
+        bail!(DecodeError::Malformed);
+    };
 
-    if transform != component_infos[1].wavelet_transform()
-        || component_infos[1].wavelet_transform() != component_infos[2].wavelet_transform()
-    {
+    let transform = c0.wavelet_transform();
+
+    if transform != c1.wavelet_transform() || transform != c2.wavelet_transform() {
         bail!(DecodeError::Malformed);
     }
 
