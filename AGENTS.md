@@ -2,7 +2,7 @@ Subband is a pure-Rust JPEG 2000 codec for Second Life textures, forked from hay
 
 Upstream only decodes. Subband adds an encoder that writes J2C codestreams for texture uploads, readable at every discard level by Subband and by other viewers' decoders.
 
-Subband is tuned for Second Life, not as a general-purpose JPEG 2000 library. Spend performance and API work on the texture path: unsigned 8-bit J2C codestreams with one to four components. Upstream features outside it, such as the JP2 container, ICC profiles, palettes and the 15444-2 color spaces, keep working but get no new work, and their cost must not leak into the texture path.
+Subband is a codec for Second Life textures, not a general-purpose JPEG 2000 library. It decodes only the texture profile: 8-bit unsigned samples with one to four components, no subsampling and zero offsets. A JP2 file is only unwrapped to find its codestream. Anything outside the profile fails with `ValidationError::Unsupported`. Follow the Second Life server's needs and limits, and improve on the classic viewer's codec behavior rather than copying it.
 
 Whatever a texture codec owns belongs in Subband, not in the viewer: codestream validation and resource limits, discard-level sizes, output at the exact size of a discard level, and pixel packing. The viewer keeps viewer policy: which discard level to request, caching and GPU upload.
 
