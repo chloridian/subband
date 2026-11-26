@@ -89,7 +89,7 @@ pub enum ValidationError {
     MissingStepSize,
     /// Invalid quantization exponents.
     InvalidExponents,
-    /// Valid codestream feature outside the texture profile.
+    /// Valid codestream outside what Subband decodes (1-4 unsigned 8-bit components, no subsampling, zero offsets).
     Unsupported,
 }
 
@@ -195,7 +195,7 @@ impl fmt::Display for ValidationError {
             }
             Self::MissingStepSize => write!(f, "missing exponent step size"),
             Self::InvalidExponents => write!(f, "invalid quantization exponents"),
-            Self::Unsupported => write!(f, "unsupported texture profile feature"),
+            Self::Unsupported => write!(f, "unsupported codestream"),
         }
     }
 }
