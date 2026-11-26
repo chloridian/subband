@@ -1,6 +1,6 @@
 # Subband
 
-Subband is a pure-Rust JPEG 2000 decoder for Second Life textures: raw J2C codestreams from untrusted sources, decoded at reduced resolution and cancellable when a texture fetch is dropped. It also unwraps the JP2 container format to decode its codestream.
+Subband is a pure-Rust JPEG 2000 decoder for Second Life textures, forked from [hayro-jpeg2000](https://github.com/LaurenzV/hayro). It decodes raw J2C codestreams from untrusted sources at reduced resolution, supports cancellation, and unwraps the JP2 container format to decode its codestream.
 
 ## Example
 
