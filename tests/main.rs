@@ -14,12 +14,12 @@ mod roi;
 mod tile_parts;
 mod wavelet;
 
-use hayro_jpeg2000::{DecodeSettings, DecoderContext, Image};
 use image::{ImageDecoder, ImageReader};
 use moxcms::{ColorProfile, Layout, TransformOptions};
 use std::fs::File;
 use std::io::{BufReader, Cursor};
 use std::path::PathBuf;
+use subband::{DecodeSettings, DecoderContext, Image};
 
 fn tests_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
@@ -138,7 +138,7 @@ fn decode(stream: &str, settings: &DecodeSettings) -> Result<Decoded, String> {
 }
 
 fn decode_output(stream: &str) -> Result<Decoded, String> {
-    hayro_jpeg2000::integration::register_decoding_hook();
+    subband::integration::register_decoding_hook();
     let mut decoder = ImageReader::new(Cursor::new(read_stream(stream)))
         .with_guessed_format()
         .map_err(|e| e.to_string())?

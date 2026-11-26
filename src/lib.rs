@@ -1,63 +1,42 @@
 /*!
-A memory-safe, pure-Rust JPEG 2000 decoder.
+A memory-safe, pure-Rust JPEG 2000 codec for Second Life textures.
 
-`hayro-jpeg2000` can decode both raw JPEG 2000 codestreams (`.j2c`) and images wrapped
-inside the JP2 container format. The decoder supports the vast majority of features
-defined in the JPEG2000 core coding system (ISO/IEC 15444-1) as well as some color
-spaces from the extensions (ISO/IEC 15444-2). There are still some missing pieces
-for some "obscure" features, but all features that actually commonly appear in real-life
-images should be supported (if not, please open an issue!).
-
-The decoder abstracts away most of the internal complexity of JPEG2000
-and yields decoded image components, which can be inspected directly or packed
-into a simple 8-bit image with either greyscale, RGB, CMYK or an ICC-based color
-space.
+Subband is a fork of [hayro-jpeg2000](https://github.com/LaurenzV/hayro), tuned for the
+textures Second Life serves: raw JPEG 2000 codestreams (`.j2c`) from untrusted sources,
+decoded at reduced resolution and cancelled when no longer needed. It still decodes the
+JP2 container format and most of the JPEG 2000 core coding system (ISO/IEC 15444-1), as
+well as some color spaces from the extensions (ISO/IEC 15444-2). An encoder is planned.
 
 # Example
 ```rust,no_run
-use hayro_jpeg2000::{DecodeSettings, DecoderContext, Image};
+use subband::{DecodeSettings, DecoderContext, Image};
 
-let data = std::fs::read("image.jp2").unwrap();
-let image = Image::new(&data, &DecodeSettings::default()).unwrap();
-
-println!(
-    "{}x{} image in {:?} with alpha={}",
-    image.width(),
-    image.height(),
-    image.color_space(),
-    image.has_alpha(),
-);
+let data = std::fs::read("texture.j2c").unwrap();
+let settings = DecodeSettings {
+    strict: true,
+    target_resolution: Some((512, 512)),
+    ..DecodeSettings::default()
+};
+let image = Image::from_codestream(&data, 3, &settings).unwrap();
 
 let mut ctx = DecoderContext::default();
 let decoded = image.decode(&mut ctx).unwrap();
-let bitmap = decoded.data_u8().unwrap();
+let pixels = decoded.data_u8().unwrap();
 ```
 
-If you want to see a more comprehensive example, please take a look
-at the example in [GitHub](https://github.com/LaurenzV/hayro/blob/main/hayro-jpeg2000/examples/png.rs),
-which shows you the main steps needed to convert a JPEG2000 image into PNG for example.
+The [`png` example](https://github.com/hymenaei/subband/blob/main/examples/png.rs)
+converts a JPEG 2000 image to PNG through the `image` crate.
 
 # Testing
-The decoder has been tested against 20.000+ images scraped from random PDFs
-on the internet and also passes a large part of the `OpenJPEG` test suite. So you
-can expect the crate to perform decently in terms of decoding correctness.
-
-# Performance
-A decent amount of effort has already been put into optimizing this crate
-(both in terms of raw performance but also memory allocations). However, there
-are some more important optimizations that have not been implemented yet, so
-there is definitely still room for improvement (and I am planning on implementing
-them eventually).
-
-Overall, you should expect this crate to have worse performance than `OpenJPEG`,
-but the difference gap should not be too large.
+Before the fork, hayro-jpeg2000 was tested against more than 20,000 images taken from
+PDFs, and it passes a large part of the `OpenJPEG` test suite.
 
 # Safety
 By default, the crate has the `simd` feature enabled, which uses the
 [`fearless_simd`](https://github.com/linebender/fearless_simd) crate to accelerate
 important parts of the pipeline. If you want to eliminate any usage of unsafe
 in this crate as well as its dependencies, you can simply disable this
-feature, at the cost of worse decoding performance. Unsafe code is forbidden
+feature, at the cost of slower decoding. Unsafe code is forbidden
 via a crate-level attribute.
 
 The crate is `no_std` compatible but requires an allocator to be available.

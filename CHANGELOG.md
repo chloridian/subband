@@ -1,10 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## Unreleased
 
-## [0.5.0] - 2026-11-02
+### Changed
 
-This release has an [MSRV] of 1.92.
+- Forked from hayro-jpeg2000 0.5.0 and renamed to `subband`.
+
+## hayro-jpeg2000 0.5.0 - 2026-11-02
+
+This release has an MSRV of 1.92.
 
 ### Added
 
@@ -58,8 +62,3 @@ This release has an [MSRV] of 1.92.
 [#1627]: https://github.com/LaurenzV/hayro/pull/1627
 [#1628]: https://github.com/LaurenzV/hayro/pull/1628
 [#1648]: https://github.com/LaurenzV/hayro/pull/1648
-
-[MSRV]: ../README.md#minimum-supported-rust-version-msrv
-
-[Unreleased]: https://github.com/LaurenzV/hayro/compare/hayro-jpeg2000-v0.5.0...HEAD
-[0.5.0]: https://github.com/LaurenzV/hayro/compare/hayro-jpeg2000-v0.4.1...hayro-jpeg2000-v0.5.0

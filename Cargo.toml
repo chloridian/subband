@@ -1,20 +1,21 @@
 [package]
-name = "hayro-jpeg2000"
-version = "0.5.0"
-description = "A memory-safe, pure-Rust JPEG 2000 decoder."
-authors = { workspace = true }
-edition = { workspace = true }
-rust-version = { workspace = true }
-repository = { workspace = true }
-license = { workspace = true }
+name = "subband"
+version = "0.1.0"
+description = "A memory-safe, pure-Rust JPEG 2000 codec for Second Life textures."
+edition = "2024"
+rust-version = "1.92"
+repository = "https://github.com/hymenaei/subband"
+license = "Apache-2.0 OR MIT"
 readme = "README.md"
-exclude = ["/tests/"]
+keywords = ["jpeg2000", "j2c", "decoder", "image", "secondlife"]
+categories = ["multimedia::images", "no-std"]
+exclude = ["/tests/", "/fuzz/", "/AGENTS.md", "/CLAUDE.md"]
 autotests = false
 
 [dependencies]
-fearless_simd = { workspace = true, optional = true }
-image = { workspace = true, default-features = false, optional = true }
-moxcms = { workspace = true, optional = true }
+fearless_simd = { version = "1.0.0", optional = true }
+image = { version = "0.25", default-features = false, optional = true }
+moxcms = { version = "0.8.1", optional = true }
 
 [features]
 default = ["std", "simd", "image"]
@@ -25,13 +26,50 @@ simd = ["fearless_simd", "std"]
 # Integration with the `image` crate.
 image = ["dep:image", "dep:moxcms", "std"]
 
-[lints]
-workspace = true
-
 [dev-dependencies]
-image = { workspace = true, default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 png = "0.18.1"
 
 [[test]]
 name = "tests"
 path = "tests/main.rs"
+
+[lints]
+# LINEBENDER LINT SET - Cargo.toml - v7
+# See https://linebender.org/wiki/canonical-lints/
+rust.keyword_idents_2024 = "forbid"
+rust.non_ascii_idents = "forbid"
+rust.non_local_definitions = "forbid"
+rust.unsafe_op_in_unsafe_fn = "forbid"
+
+rust.elided_lifetimes_in_paths = "warn"
+rust.missing_docs = "warn"
+rust.trivial_numeric_casts = "warn"
+rust.unnameable_types = "warn"
+rust.unreachable_pub = "warn"
+rust.unused_import_braces = "warn"
+rust.unused_lifetimes = "warn"
+rust.unused_macro_rules = "warn"
+rust.unused_qualifications = "warn"
+
+clippy.too_many_arguments = "allow"
+
+clippy.collection_is_never_read = "warn"
+clippy.default_trait_access = "warn"
+clippy.dbg_macro = "warn"
+clippy.debug_assert_with_mut_call = "warn"
+clippy.doc_markdown = "warn"
+clippy.fn_to_numeric_cast_any = "warn"
+clippy.infinite_loop = "warn"
+clippy.large_stack_arrays = "warn"
+clippy.mismatching_type_param_order = "warn"
+clippy.same_functions_in_if_condition = "warn"
+clippy.semicolon_if_nothing_returned = "warn"
+clippy.todo = "warn"
+clippy.unseparated_literal_suffix = "warn"
+clippy.use_self = "warn"
+
+clippy.negative_feature_names = "warn"
+clippy.redundant_feature_names = "warn"
+clippy.wildcard_dependencies = "warn"
+# END LINEBENDER LINT SET

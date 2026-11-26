@@ -1,4 +1,4 @@
-use hayro_jpeg2000::CancelHandle;
+use subband::CancelHandle;
 
 use crate::*;
 

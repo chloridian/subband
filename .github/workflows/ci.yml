@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Clippy, formatting and docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-hack
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+      - run: RUSTFLAGS="-D warnings" cargo hack check --each-feature
+      - run: cargo check --manifest-path fuzz/Cargo.toml
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: true
+      CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release --locked --no-fail-fast
+
+  msrv:
+    name: Minimum Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked
+
+  no_std:
+    name: no_std
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: thumbv6m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --no-default-features --target thumbv6m-none-eabi
