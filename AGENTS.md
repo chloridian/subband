@@ -34,7 +34,7 @@ Subband is a pure-Rust JPEG 2000 codec for Second Life textures, for any Second 
 - Minimize visibility. Use `unsafe` only when necessary.
 - Propagate with `?`. `unwrap`, `expect`, indexing, slicing and unchecked arithmetic are for invariants you can prove, never for stream data.
 - Handle every fallible result.
-- Errors are `DecodeError`: `Unsupported`, `TooLarge`, `Malformed` or `Cancelled`. `Option<T>` for absence.
+- Errors are `DecodeError`: `Unsupported`, `TooLarge`, `Malformed`, `Cancelled` or `BufferSize`. `Option<T>` for absence.
 - Check limits before allocating. Reuse buffers through `DecoderContext` across decodes, and allocate only for the resolution levels a decode needs.
 
 ## Naming
