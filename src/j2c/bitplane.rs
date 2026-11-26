@@ -1,5 +1,5 @@
-use alloc::vec;
-use alloc::vec::Vec;
+use std::vec;
+use std::vec::Vec;
 
 use super::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 use super::build::{CodeBlock, SubBandType};

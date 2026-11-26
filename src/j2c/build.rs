@@ -4,9 +4,9 @@ use super::tag_tree::TagTree;
 use super::tile::{ResolutionTile, Tile};
 use crate::cancel::Cancel;
 use crate::error::{DecodingError, Result, ValidationError};
-use alloc::vec;
 use core::iter;
 use core::ops::Range;
+use std::vec;
 
 pub(crate) fn build(
     tile: &Tile<'_>,

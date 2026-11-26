@@ -1,5 +1,5 @@
-use alloc::vec;
-use alloc::vec::Vec;
+use std::vec;
+use std::vec::Vec;
 
 pub(crate) const SIMD_WIDTH: usize = 8;
 
@@ -289,7 +289,7 @@ mod inner {
 
         #[inline(always)]
         pub(crate) fn floor(self) -> Self {
-            let result = core::array::from_fn(|i| super::floor_f32(self.val[i]));
+            let result = core::array::from_fn(|i| self.val[i].floor());
             Self {
                 val: result,
                 _marker: PhantomData,
@@ -460,45 +460,25 @@ mod inner {
 
 #[inline(always)]
 pub(crate) fn mul_add(a: f32, b: f32, c: f32) -> f32 {
-    #[cfg(all(
-        feature = "std",
-        any(
-            all(
-                any(target_arch = "x86", target_arch = "x86_64"),
-                target_feature = "fma"
-            ),
-            all(target_arch = "aarch64", target_feature = "neon")
-        )
+    #[cfg(any(
+        all(
+            any(target_arch = "x86", target_arch = "x86_64"),
+            target_feature = "fma"
+        ),
+        all(target_arch = "aarch64", target_feature = "neon")
     ))]
     {
         f32::mul_add(a, b, c)
     }
-    #[cfg(not(all(
-        feature = "std",
-        any(
-            all(
-                any(target_arch = "x86", target_arch = "x86_64"),
-                target_feature = "fma"
-            ),
-            all(target_arch = "aarch64", target_feature = "neon")
-        )
+    #[cfg(not(any(
+        all(
+            any(target_arch = "x86", target_arch = "x86_64"),
+            target_feature = "fma"
+        ),
+        all(target_arch = "aarch64", target_feature = "neon")
     )))]
     {
         a * b + c
-    }
-}
-
-#[inline(always)]
-pub(crate) fn floor_f32(x: f32) -> f32 {
-    #[cfg(feature = "std")]
-    {
-        x.floor()
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        let xi = x as i32;
-        let xf = xi as f32;
-        if x < xf { xf - 1.0 } else { xf }
     }
 }
 

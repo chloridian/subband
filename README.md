@@ -37,8 +37,6 @@ in this crate as well as its dependencies, you can simply disable this
 feature, at the cost of slower decoding. Unsafe code is forbidden
 via a crate-level attribute.
 
-The crate is `no_std` compatible but requires an allocator to be available.
-
 <!-- cargo-rdme end -->
 
 ## License

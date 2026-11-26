@@ -3,12 +3,12 @@ name = "subband"
 version = "0.1.0"
 description = "A memory-safe, pure-Rust JPEG 2000 codec for Second Life textures."
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.100"
 repository = "https://github.com/hymenaei/subband"
 license = "Apache-2.0 OR MIT"
 readme = "README.md"
 keywords = ["jpeg2000", "j2c", "decoder", "image", "secondlife"]
-categories = ["multimedia::images", "no-std"]
+categories = ["multimedia::images"]
 exclude = ["/benches/", "/tests/", "/fuzz/", "/AGENTS.md", "/CLAUDE.md"]
 autotests = false
 autobenches = false
@@ -17,11 +17,9 @@ autobenches = false
 fearless_simd = { version = "1.0.0", optional = true }
 
 [features]
-default = ["std", "simd"]
-# Enable std library support. Disable for no_std environments.
-std = []
+default = ["simd"]
 # Enable SIMD via `fearless_simd`.
-simd = ["fearless_simd", "std"]
+simd = ["fearless_simd"]
 
 [dev-dependencies]
 divan = { package = "codspeed-divan-compat", version = "6.0.0" }

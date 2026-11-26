@@ -32,18 +32,13 @@ important parts of the pipeline. If you want to eliminate any usage of unsafe
 in this crate as well as its dependencies, you can simply disable this
 feature, at the cost of slower decoding. Unsafe code is forbidden
 via a crate-level attribute.
-
-The crate is `no_std` compatible but requires an allocator to be available.
 */
 
-#![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 #![forbid(missing_docs)]
 
-extern crate alloc;
-
-use alloc::vec;
-use alloc::vec::Vec;
+use std::vec;
+use std::vec::Vec;
 
 use crate::error::err;
 use crate::j2c::Header;
@@ -51,7 +46,6 @@ use crate::j2c::Header;
 mod cancel;
 pub mod error;
 pub(crate) mod math;
-mod sync;
 
 use cancel::{CHUNK, Cancel};
 pub use cancel::{CancelCheck, CancelHandle};

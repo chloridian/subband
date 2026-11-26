@@ -1,4 +1,4 @@
-use alloc::boxed::Box;
+use std::boxed::Box;
 
 use super::build::Segment;
 use super::codestream::markers::{EPH, SOP};

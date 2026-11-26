@@ -1,7 +1,7 @@
-use alloc::boxed::Box;
-use alloc::collections::BTreeSet;
-use alloc::vec;
-use alloc::vec::Vec;
+use std::boxed::Box;
+use std::collections::BTreeSet;
+use std::vec;
+use std::vec::Vec;
 
 use super::codestream::{Header, ProgressionOrder};
 use super::tile::{ComponentTile, ResolutionTile, Tile};
