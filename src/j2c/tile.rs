@@ -71,23 +71,15 @@ impl<'a> Tile<'a> {
             let x_coord = u64::from(size_data.tile_x_coord(idx));
             let y_coord = u64::from(size_data.tile_y_coord(idx));
 
-            let x0 = u64::max(
-                u64::from(size_data.tile_x_offset) + x_coord * u64::from(size_data.tile_width),
-                u64::from(size_data.image_area_x_offset),
-            ) as u32;
-            let y0 = u64::max(
-                u64::from(size_data.tile_y_offset) + y_coord * u64::from(size_data.tile_height),
-                u64::from(size_data.image_area_y_offset),
-            ) as u32;
+            let x0 = (x_coord * u64::from(size_data.tile_width)) as u32;
+            let y0 = (y_coord * u64::from(size_data.tile_height)) as u32;
 
             let x1 = u64::min(
-                u64::from(size_data.tile_x_offset)
-                    + (x_coord + 1) * u64::from(size_data.tile_width),
+                (x_coord + 1) * u64::from(size_data.tile_width),
                 u64::from(size_data.reference_grid_width),
             ) as u32;
             let y1 = u64::min(
-                u64::from(size_data.tile_y_offset)
-                    + (y_coord + 1) * u64::from(size_data.tile_height),
+                (y_coord + 1) * u64::from(size_data.tile_height),
                 u64::from(size_data.reference_grid_height),
             ) as u32;
 
@@ -335,33 +327,10 @@ pub(crate) struct ComponentTile<'a> {
 
 impl<'a> ComponentTile<'a> {
     pub(crate) fn new(tile: &'a Tile<'a>, component_info: &'a ComponentInfo) -> Self {
-        let tile_rect = tile.rect;
-
-        let rect = if component_info.size_info.horizontal_resolution == 1
-            && component_info.size_info.vertical_resolution == 1
-        {
-            tile_rect
-        } else {
-            let t_x0 = tile_rect
-                .x0
-                .div_ceil(component_info.size_info.horizontal_resolution as u32);
-            let t_y0 = tile_rect
-                .y0
-                .div_ceil(component_info.size_info.vertical_resolution as u32);
-            let t_x1 = tile_rect
-                .x1
-                .div_ceil(component_info.size_info.horizontal_resolution as u32);
-            let t_y1 = tile_rect
-                .y1
-                .div_ceil(component_info.size_info.vertical_resolution as u32);
-
-            IntRect::from_ltrb(t_x0, t_y0, t_x1, t_y1)
-        };
-
         ComponentTile {
             tile,
             component_info,
-            rect,
+            rect: tile.rect,
         }
     }
 
@@ -556,33 +525,19 @@ impl<'a> ResolutionTile<'a> {
         let y_stride =
             1_u32.checked_shl(self.precinct_exponent_y().checked_add(nl_minus_r)? as u32)?;
 
-        let precinct_x_step = (self
-            .component_tile
-            .component_info
-            .size_info
-            .horizontal_resolution as u32)
-            .checked_mul(x_stride)?;
-
-        let precinct_y_step = (self
-            .component_tile
-            .component_info
-            .size_info
-            .vertical_resolution as u32)
-            .checked_mul(y_stride)?;
-
         let mut r_x = self.component_tile.tile.rect.x0;
         let mut r_y = self.component_tile.tile.rect.y0;
 
-        if !r_x.is_multiple_of(precinct_x_step)
+        if !r_x.is_multiple_of(x_stride)
             && (self.rect.x0 * (1 << nl_minus_r)).is_multiple_of(x_stride)
         {
-            r_x = r_x.checked_next_multiple_of(precinct_x_step)?;
+            r_x = r_x.checked_next_multiple_of(x_stride)?;
         }
 
-        if !r_y.is_multiple_of(precinct_y_step)
+        if !r_y.is_multiple_of(y_stride)
             && (self.rect.y0 * (1 << nl_minus_r)).is_multiple_of(y_stride)
         {
-            r_y = r_y.checked_next_multiple_of(precinct_y_step)?;
+            r_y = r_y.checked_next_multiple_of(y_stride)?;
         }
 
         let iter = (0..num_precincts_y).flat_map(move |y| {
@@ -599,12 +554,12 @@ impl<'a> ResolutionTile<'a> {
                     idx: num_precincts_x as u64 * y as u64 + x as u64,
                 };
 
-                r_x = (r_x + 1).next_multiple_of(precinct_x_step);
+                r_x = (r_x + 1).next_multiple_of(x_stride);
 
                 data
             });
 
-            r_y = (r_y + 1).next_multiple_of(precinct_y_step);
+            r_y = (r_y + 1).next_multiple_of(y_stride);
 
             res
         });
@@ -687,79 +642,46 @@ mod tests {
     use super::*;
     use crate::j2c::codestream::{
         CodeBlockStyle, CodingStyleComponent, CodingStyleDefault, CodingStyleFlags,
-        CodingStyleParameters, ComponentSizeInfo, QuantizationInfo, QuantizationStyle, SizeData,
-        WaveletTransform,
+        CodingStyleParameters, QuantizationInfo, QuantizationStyle, SizeData, WaveletTransform,
     };
 
     #[test]
-    fn test_jpeg2000_standard_example_b4() {
-        let component_size_info_0 = ComponentSizeInfo {
-            precision: 8,
-            horizontal_resolution: 1,
-            vertical_resolution: 1,
-        };
-
-        let dummy_component_coding_style = CodingStyleComponent {
-            flags: CodingStyleFlags::default(),
-            parameters: CodingStyleParameters {
-                num_decomposition_levels: 0,
-                num_resolution_levels: 0,
-                code_block_width: 0,
-                code_block_height: 0,
-                code_block_style: CodeBlockStyle::default(),
-                transformation: WaveletTransform::Irreversible97,
-                precinct_exponents: vec![],
+    fn tile_geometry_zero_offset() {
+        let component_info = ComponentInfo {
+            coding_style: CodingStyleComponent {
+                flags: CodingStyleFlags::default(),
+                parameters: CodingStyleParameters {
+                    num_decomposition_levels: 0,
+                    num_resolution_levels: 0,
+                    code_block_width: 0,
+                    code_block_height: 0,
+                    code_block_style: CodeBlockStyle::default(),
+                    transformation: WaveletTransform::Irreversible97,
+                    precinct_exponents: vec![],
+                },
             },
-        };
-
-        let dummy_quantization_info = QuantizationInfo {
-            quantization_style: QuantizationStyle::NoQuantization,
-            guard_bits: 0,
-            step_sizes: vec![],
-        };
-
-        let component_info_0 = ComponentInfo {
-            size_info: component_size_info_0,
-            coding_style: dummy_component_coding_style.clone(),
-            quantization_info: dummy_quantization_info.clone(),
-            roi_shift: 0,
-        };
-
-        let component_size_info_1 = ComponentSizeInfo {
-            precision: 8,
-            horizontal_resolution: 2,
-            vertical_resolution: 2,
-        };
-
-        let component_info_1 = ComponentInfo {
-            size_info: component_size_info_1,
-            coding_style: dummy_component_coding_style.clone(),
-            quantization_info: dummy_quantization_info.clone(),
+            quantization_info: QuantizationInfo {
+                quantization_style: QuantizationStyle::NoQuantization,
+                guard_bits: 0,
+                step_sizes: vec![],
+            },
             roi_shift: 0,
         };
 
         let size_data = SizeData {
-            reference_grid_width: 1432,
-            reference_grid_height: 954,
-            image_area_x_offset: 152,
-            image_area_y_offset: 234,
+            reference_grid_width: 1280,
+            reference_grid_height: 720,
             tile_width: 396,
             tile_height: 297,
-            tile_x_offset: 0,
-            tile_y_offset: 0,
-            component_sizes: vec![component_size_info_0, component_size_info_1],
-            x_shrink_factor: 1,
-            y_shrink_factor: 1,
-            x_resolution_shrink_factor: 1,
-            y_resolution_shrink_factor: 1,
+            num_components: 1,
+            resolution_shrink_factor: 1,
         };
 
         assert_eq!(size_data.image_width(), 1280);
         assert_eq!(size_data.image_height(), 720);
-
         assert_eq!(size_data.num_x_tiles(), 4);
-        assert_eq!(size_data.num_y_tiles(), 4);
-        assert_eq!(size_data.num_tiles().unwrap(), 16);
+        assert_eq!(size_data.num_y_tiles(), 3);
+        assert_eq!(size_data.num_tiles().unwrap(), 12);
 
         let header = Header {
             size_data,
@@ -767,18 +689,7 @@ mod tests {
                 progression_order: ProgressionOrder::LayerResolutionComponentPosition,
                 num_layers: 0,
                 mct: false,
-                component_parameters: CodingStyleComponent {
-                    flags: CodingStyleFlags::default(),
-                    parameters: CodingStyleParameters {
-                        num_decomposition_levels: 0,
-                        num_resolution_levels: 0,
-                        code_block_width: 0,
-                        code_block_height: 0,
-                        code_block_style: CodeBlockStyle::default(),
-                        transformation: WaveletTransform::Irreversible97,
-                        precinct_exponents: vec![],
-                    },
-                },
+                component_parameters: component_info.coding_style.clone(),
             },
             component_infos: vec![],
             ppm_packets: vec![],
@@ -788,92 +699,11 @@ mod tests {
         };
 
         let tile_0_0 = Tile::new(0, &header);
-        let coords_0_0 = ComponentTile::new(&tile_0_0, &component_info_0).rect;
-        assert_eq!(coords_0_0.x0, 152);
-        assert_eq!(coords_0_0.y0, 234);
-        assert_eq!(coords_0_0.x1, 396);
-        assert_eq!(coords_0_0.y1, 297);
-        assert_eq!(coords_0_0.width(), 244);
-        assert_eq!(coords_0_0.height(), 63);
+        let coords_0_0 = ComponentTile::new(&tile_0_0, &component_info).rect;
+        assert_eq!(coords_0_0, IntRect::from_ltrb(0, 0, 396, 297));
 
-        let tile_1_0 = Tile::new(1, &header);
-        let coords_1_0 = ComponentTile::new(&tile_1_0, &component_info_0).rect;
-        assert_eq!(coords_1_0.x0, 396);
-        assert_eq!(coords_1_0.y0, 234);
-        assert_eq!(coords_1_0.x1, 792);
-        assert_eq!(coords_1_0.y1, 297);
-        assert_eq!(coords_1_0.width(), 396);
-        assert_eq!(coords_1_0.height(), 63);
-
-        let tile_0_1 = Tile::new(4, &header);
-        let coords_0_1 = ComponentTile::new(&tile_0_1, &component_info_0).rect;
-        assert_eq!(coords_0_1.x0, 152);
-        assert_eq!(coords_0_1.y0, 297);
-        assert_eq!(coords_0_1.x1, 396);
-        assert_eq!(coords_0_1.y1, 594);
-        assert_eq!(coords_0_1.width(), 244);
-        assert_eq!(coords_0_1.height(), 297);
-
-        let tile_1_1 = Tile::new(5, &header);
-        let coords_1_1 = ComponentTile::new(&tile_1_1, &component_info_0).rect;
-        assert_eq!(coords_1_1.x0, 396);
-        assert_eq!(coords_1_1.y0, 297);
-        assert_eq!(coords_1_1.x1, 792);
-        assert_eq!(coords_1_1.y1, 594);
-        assert_eq!(coords_1_1.width(), 396);
-        assert_eq!(coords_1_1.height(), 297);
-
-        let tile_3_3 = Tile::new(15, &header);
-        let coords_3_3 = ComponentTile::new(&tile_3_3, &component_info_0).rect;
-        assert_eq!(coords_3_3.x0, 1188);
-        assert_eq!(coords_3_3.y0, 891);
-        assert_eq!(coords_3_3.x1, 1432);
-        assert_eq!(coords_3_3.y1, 954);
-        assert_eq!(coords_3_3.width(), 244);
-        assert_eq!(coords_3_3.height(), 63);
-
-        let tile_0_0_comp1 = ComponentTile::new(&tile_0_0, &component_info_1).rect;
-        assert_eq!(tile_0_0_comp1.x0, 76);
-        assert_eq!(tile_0_0_comp1.y0, 117);
-        assert_eq!(tile_0_0_comp1.x1, 198);
-        assert_eq!(tile_0_0_comp1.y1, 149);
-        assert_eq!(tile_0_0_comp1.width(), 122);
-        assert_eq!(tile_0_0_comp1.height(), 32);
-
-        let tile_1_0_comp1 = ComponentTile::new(&tile_1_0, &component_info_1).rect;
-        assert_eq!(tile_1_0_comp1.x0, 198);
-        assert_eq!(tile_1_0_comp1.y0, 117);
-        assert_eq!(tile_1_0_comp1.x1, 396);
-        assert_eq!(tile_1_0_comp1.y1, 149);
-        assert_eq!(tile_1_0_comp1.width(), 198);
-        assert_eq!(tile_1_0_comp1.height(), 32);
-
-        let tile_0_1_comp1 = ComponentTile::new(&tile_0_1, &component_info_1).rect;
-        assert_eq!(tile_0_1_comp1.x0, 76);
-        assert_eq!(tile_0_1_comp1.y0, 149);
-        assert_eq!(tile_0_1_comp1.x1, 198);
-        assert_eq!(tile_0_1_comp1.y1, 297);
-        assert_eq!(tile_0_1_comp1.width(), 122);
-        assert_eq!(tile_0_1_comp1.height(), 148);
-
-        let tile_1_1_comp1 = ComponentTile::new(&tile_1_1, &component_info_1).rect;
-        assert_eq!(tile_1_1_comp1.x0, 198);
-        assert_eq!(tile_1_1_comp1.y0, 149);
-        assert_eq!(tile_1_1_comp1.x1, 396);
-        assert_eq!(tile_1_1_comp1.y1, 297);
-        assert_eq!(tile_1_1_comp1.width(), 198);
-        assert_eq!(tile_1_1_comp1.height(), 148);
-
-        let tile_2_1 = Tile::new(6, &header);
-        let tile_2_1_comp1 = ComponentTile::new(&tile_2_1, &component_info_1).rect;
-        assert_eq!(tile_2_1_comp1.x0, 396);
-        assert_eq!(tile_2_1_comp1.y0, 149);
-        assert_eq!(tile_2_1_comp1.x1, 594);
-        assert_eq!(tile_2_1_comp1.y1, 297);
-        assert_eq!(tile_2_1_comp1.width(), 198);
-        assert_eq!(tile_2_1_comp1.height(), 148);
-
-        assert_eq!(tile_1_1_comp1.width(), tile_2_1_comp1.width());
-        assert_eq!(tile_1_1_comp1.height(), tile_2_1_comp1.height());
+        let tile_3_2 = Tile::new(11, &header);
+        let coords_3_2 = ComponentTile::new(&tile_3_2, &component_info).rect;
+        assert_eq!(coords_3_2, IntRect::from_ltrb(1188, 594, 1280, 720));
     }
 }

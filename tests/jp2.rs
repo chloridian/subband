@@ -31,21 +31,6 @@ fn rgba() {
 }
 
 #[test]
-fn cdef_alpha_not_last() {
-    check("jp2_cdef_alpha_not_last", reference("main_rgba"));
-}
-
-#[test]
-fn cdef_reordered() {
-    check("jp2_cdef_reordered", reference("main_rgba"));
-}
-
-#[test]
-fn bpcc() {
-    check("jp2_bpcc", reference("main_rgba_5_5_5_1bit"));
-}
-
-#[test]
 fn jpx_brand_rreq() {
     check("jp2_jpx_brand_rreq", reference("main_rgb"));
 }
@@ -83,37 +68,4 @@ fn trailing_zero_box() {
 #[test]
 fn duplicate_ihdr() {
     check("jp2_duplicate_ihdr", reference("main_rgb"));
-}
-
-#[test]
-fn colr_sycc_444() {
-    check("jp2_colr_sycc_444", reference("jp2_colr_sycc_444"));
-}
-
-#[test]
-fn colr_sycc_422() {
-    check("jp2_colr_sycc_422", reference("jp2_colr_sycc_422"));
-}
-
-#[test]
-fn colr_sycc_420() {
-    check("jp2_colr_sycc_420", reference("jp2_colr_sycc_420"));
-}
-
-#[test]
-fn cdef_reversed_sycc() {
-    check(
-        "jp2_cdef_reversed_sycc",
-        reference("jp2_cdef_reversed_sycc"),
-    );
-}
-
-#[test]
-fn colr_first_wins() {
-    check("jp2_colr_first_wins", reference("jp2_cdef_reversed_sycc"));
-}
-
-#[test]
-fn colr_ycck() {
-    check("jp2_colr_ycck", reference("jp2_colr_ycck"));
 }

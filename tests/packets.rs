@@ -51,22 +51,6 @@ fn late_inclusion() {
 }
 
 #[test]
-fn lblock_large() {
-    check(
-        "packets_lblock_large",
-        reference("stress_16bit_crop_64_0_64_64"),
-    );
-}
-
-#[test]
-fn passes_codeword_long() {
-    check(
-        "packets_passes_codeword_long",
-        reference("stress_16bit_crop_64_0_64_64"),
-    );
-}
-
-#[test]
 fn sop_missing() {
     check("packets_sop_missing", reference("main_r"));
 }
@@ -89,11 +73,6 @@ fn ppm_many_segments() {
 #[test]
 fn ppm_spanning_segments() {
     check("packets_ppm_spanning_segments", reference("main_r"));
-}
-
-#[test]
-fn ppm_many_tiles() {
-    check("packets_ppm_many_tiles", reference("main_r"));
 }
 
 #[test]
@@ -168,46 +147,8 @@ fn poc_clamped_values() {
 }
 
 #[test]
-fn poc_subsampled() {
-    check(
-        "packets_poc_subsampled",
-        reference("main_rgb_sub_1x1_2x2_1x2"),
-    );
-}
-
-#[test]
-fn poc_offset() {
-    check("packets_poc_offset", reference("main_rgb"));
-}
-
-#[test]
 fn poc_tile_parts() {
     check("packets_poc_tile_parts", reference("main_rgb"));
-}
-
-#[test]
-fn mixed_levels_lrcp() {
-    check("packets_mixed_levels_lrcp", reference("main_rgb"));
-}
-
-#[test]
-fn mixed_levels_rlcp() {
-    check("packets_mixed_levels_rlcp", reference("main_rgb"));
-}
-
-#[test]
-fn mixed_levels_rpcl() {
-    check("packets_mixed_levels_rpcl", reference("main_rgb"));
-}
-
-#[test]
-fn mixed_levels_pcrl() {
-    check("packets_mixed_levels_pcrl", reference("main_rgb"));
-}
-
-#[test]
-fn mixed_levels_cprl() {
-    check("packets_mixed_levels_cprl", reference("main_rgb"));
 }
 
 #[test]

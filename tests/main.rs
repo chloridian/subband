@@ -4,20 +4,16 @@ mod cancel;
 mod code_blocks;
 mod codestream;
 mod errors;
-mod integration;
 mod jp2;
 mod mct;
 mod packets;
-mod palette;
 mod quantization;
 mod roi;
 mod tile_parts;
 mod wavelet;
 
-use image::{ImageDecoder, ImageReader};
-use moxcms::{ColorProfile, Layout, TransformOptions};
 use std::fs::File;
-use std::io::{BufReader, Cursor};
+use std::io::BufReader;
 use std::path::PathBuf;
 use subband::{DecodeSettings, DecoderContext, Image};
 
@@ -137,53 +133,6 @@ fn decode(stream: &str, settings: &DecodeSettings) -> Result<Decoded, String> {
     })
 }
 
-fn decode_output(stream: &str) -> Result<Decoded, String> {
-    subband::integration::register_decoding_hook();
-    let mut decoder = ImageReader::new(Cursor::new(read_stream(stream)))
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?
-        .into_decoder()
-        .map_err(|e| e.to_string())?;
-    let (width, height) = decoder.dimensions();
-    let channels = usize::from(decoder.color_type().channel_count());
-    let icc_profile = decoder.icc_profile().map_err(|e| e.to_string())?;
-    let mut samples = vec![0; decoder.total_bytes() as usize];
-    decoder
-        .read_image(&mut samples)
-        .map_err(|e| e.to_string())?;
-    if let Some(profile) = icc_profile {
-        samples = to_srgb(&profile, channels, &samples);
-    }
-
-    Ok(Decoded {
-        width,
-        height,
-        channels,
-        samples,
-    })
-}
-
-fn to_srgb(profile: &[u8], channels: usize, samples: &[u8]) -> Vec<u8> {
-    let layout = match channels {
-        1 => Layout::Gray,
-        2 => Layout::GrayAlpha,
-        3 => Layout::Rgb,
-        _ => Layout::Rgba,
-    };
-    let transform = ColorProfile::new_from_slice(profile)
-        .unwrap()
-        .create_transform_8bit(
-            layout,
-            &ColorProfile::new_srgb(),
-            layout,
-            TransformOptions::default(),
-        )
-        .unwrap();
-    let mut out = vec![0; samples.len()];
-    transform.transform(samples, &mut out).unwrap();
-    out
-}
-
 fn check(stream: &str, expected: Reference) {
     check_with(stream, DecodeSettings::default(), expected);
 }
@@ -191,31 +140,6 @@ fn check(stream: &str, expected: Reference) {
 fn check_with(stream: &str, settings: DecodeSettings, expected: Reference) {
     let actual =
         decode(stream, &settings).unwrap_or_else(|e| panic!("{stream}: decoding failed: {e}"));
-    expected.compare(stream, &actual);
-}
-
-fn check_components(stream: &str, expected: Reference) {
-    let actual = decode(stream, &DecodeSettings::default())
-        .unwrap_or_else(|e| panic!("{stream}: decoding failed: {e}"));
-    let (width, channels) = (actual.width as usize, actual.channels);
-    let samples = actual
-        .samples
-        .chunks_exact(width * channels)
-        .flat_map(|row| (0..channels).flat_map(move |c| row.iter().skip(c).step_by(channels)))
-        .copied()
-        .collect();
-
-    let side_by_side = Decoded {
-        width: actual.width * channels as u32,
-        height: actual.height,
-        channels: 1,
-        samples,
-    };
-    expected.compare(stream, &side_by_side);
-}
-
-fn check_output(stream: &str, expected: Reference) {
-    let actual = decode_output(stream).unwrap_or_else(|e| panic!("{stream}: decoding failed: {e}"));
     expected.compare(stream, &actual);
 }
 

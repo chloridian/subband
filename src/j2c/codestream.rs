@@ -2,7 +2,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::DecodeSettings;
-use super::bitplane::BITPLANE_BIT_SIZE;
 use super::build::SubBandType;
 use crate::error::{MarkerError, Result, ValidationError, bail, err};
 use crate::reader::BitReader;
@@ -44,7 +43,7 @@ pub(crate) fn read_header<'a>(
     let mut cod = None;
     let mut qcd = None;
 
-    let num_components = size_data.component_sizes.len() as u16;
+    let num_components = size_data.num_components;
     let mut cod_components = vec![None; num_components as usize];
     let mut qcd_components = vec![None; num_components as usize];
     let mut roi_shifts = vec![0; num_components as usize];
@@ -120,12 +119,8 @@ pub(crate) fn read_header<'a>(
     let cod = cod.ok_or(MarkerError::Missing("COD"))?;
     let qcd = qcd.ok_or(MarkerError::Missing("QCD"))?;
 
-    let component_infos: Vec<ComponentInfo> = size_data
-        .component_sizes
-        .iter()
-        .enumerate()
-        .map(|(idx, csi)| ComponentInfo {
-            size_info: *csi,
+    let component_infos: Vec<ComponentInfo> = (0..num_components as usize)
+        .map(|idx| ComponentInfo {
             coding_style: cod_components[idx]
                 .clone()
                 .map(|mut c| {
@@ -163,8 +158,7 @@ pub(crate) fn read_header<'a>(
         }
         .min(min_num_resolution_levels - 1);
 
-    size_data.x_resolution_shrink_factor *= 1 << skipped_resolution_levels;
-    size_data.y_resolution_shrink_factor *= 1 << skipped_resolution_levels;
+    size_data.resolution_shrink_factor *= 1 << skipped_resolution_levels;
 
     let ppm_packets = ppm_packets(ppm_markers).ok_or(MarkerError::ParseFailure("PPM"))?;
 
@@ -211,7 +205,6 @@ fn validate(header: &Header) -> Result<()> {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ComponentInfo {
-    pub(crate) size_info: ComponentSizeInfo,
     pub(crate) coding_style: CodingStyleComponent,
     pub(crate) quantization_info: QuantizationInfo,
     pub(crate) roi_shift: u8,
@@ -436,17 +429,10 @@ pub(crate) struct CodingStyleParameters {
 pub(crate) struct SizeData {
     pub(crate) reference_grid_width: u32,
     pub(crate) reference_grid_height: u32,
-    pub(crate) image_area_x_offset: u32,
-    pub(crate) image_area_y_offset: u32,
     pub(crate) tile_width: u32,
     pub(crate) tile_height: u32,
-    pub(crate) tile_x_offset: u32,
-    pub(crate) tile_y_offset: u32,
-    pub(crate) component_sizes: Vec<ComponentSizeInfo>,
-    pub(crate) x_shrink_factor: u32,
-    pub(crate) y_shrink_factor: u32,
-    pub(crate) x_resolution_shrink_factor: u32,
-    pub(crate) y_resolution_shrink_factor: u32,
+    pub(crate) num_components: u16,
+    pub(crate) resolution_shrink_factor: u32,
 }
 
 impl SizeData {
@@ -457,22 +443,13 @@ impl SizeData {
     pub(crate) fn tile_y_coord(&self, idx: u32) -> u32 {
         idx / self.num_x_tiles()
     }
-}
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ComponentSizeInfo {
-    pub(crate) precision: u8,
-    pub(crate) horizontal_resolution: u8,
-    pub(crate) vertical_resolution: u8,
-}
-
-impl SizeData {
     pub(crate) fn num_x_tiles(&self) -> u32 {
-        (self.reference_grid_width - self.tile_x_offset).div_ceil(self.tile_width)
+        self.reference_grid_width.div_ceil(self.tile_width)
     }
 
     pub(crate) fn num_y_tiles(&self) -> u32 {
-        (self.reference_grid_height - self.tile_y_offset).div_ceil(self.tile_height)
+        self.reference_grid_height.div_ceil(self.tile_height)
     }
 
     pub(crate) fn num_tiles(&self) -> Result<u32> {
@@ -484,155 +461,75 @@ impl SizeData {
         Ok(tile_count)
     }
 
-    fn x_divisor(&self) -> u64 {
-        u64::from(self.x_shrink_factor) * u64::from(self.x_resolution_shrink_factor)
-    }
-
-    fn y_divisor(&self) -> u64 {
-        u64::from(self.y_shrink_factor) * u64::from(self.y_resolution_shrink_factor)
-    }
-
-    pub(crate) fn image_x_offset(&self) -> u32 {
-        u64::from(self.image_area_x_offset).div_ceil(self.x_divisor()) as u32
-    }
-
-    pub(crate) fn image_y_offset(&self) -> u32 {
-        u64::from(self.image_area_y_offset).div_ceil(self.y_divisor()) as u32
-    }
-
     pub(crate) fn image_width(&self) -> u32 {
-        u64::from(self.reference_grid_width).div_ceil(self.x_divisor()) as u32
-            - self.image_x_offset()
+        self.reference_grid_width
+            .div_ceil(self.resolution_shrink_factor)
     }
 
     pub(crate) fn image_height(&self) -> u32 {
-        u64::from(self.reference_grid_height).div_ceil(self.y_divisor()) as u32
-            - self.image_y_offset()
+        self.reference_grid_height
+            .div_ceil(self.resolution_shrink_factor)
     }
 }
 
 fn size_marker(reader: &mut BitReader<'_>) -> Result<SizeData> {
-    let size_data = size_marker_inner(reader).ok_or(MarkerError::ParseFailure("SIZ"))?;
+    let _ = reader.read_u16().ok_or(MarkerError::ParseFailure("SIZ"))?;
+    let _ = reader.read_u16().ok_or(MarkerError::ParseFailure("SIZ"))?;
 
-    if size_data.tile_width == 0
-        || size_data.tile_height == 0
-        || size_data.reference_grid_width == 0
-        || size_data.reference_grid_height == 0
-    {
+    let xsiz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
+    let ysiz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
+    let x_osiz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
+    let y_osiz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
+    let xt_siz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
+    let yt_siz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
+    let xto_siz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
+    let yto_siz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
+    let csiz = reader.read_u16().ok_or(MarkerError::ParseFailure("SIZ"))?;
+
+    if xsiz == 0 || ysiz == 0 || xt_siz == 0 || yt_siz == 0 {
         bail!(ValidationError::InvalidDimensions);
     }
 
-    if size_data.tile_x_offset >= size_data.reference_grid_width
-        || size_data.tile_y_offset >= size_data.reference_grid_height
-    {
+    if x_osiz >= xsiz || y_osiz >= ysiz || xto_siz >= xsiz || yto_siz >= ysiz {
         bail!(ValidationError::InvalidDimensions);
-    }
-
-    if size_data.tile_x_offset > size_data.image_area_x_offset
-        || size_data.tile_y_offset > size_data.image_area_y_offset
-    {
-        bail!(crate::TileError::InvalidOffsets);
-    }
-
-    if size_data
-        .tile_x_offset
-        .checked_add(size_data.tile_width)
-        .ok_or(crate::TileError::InvalidOffsets)?
-        <= size_data.image_area_x_offset
-        || size_data
-            .tile_y_offset
-            .checked_add(size_data.tile_height)
-            .ok_or(crate::TileError::InvalidOffsets)?
-            <= size_data.image_area_y_offset
-    {
-        bail!(crate::TileError::InvalidOffsets);
-    }
-
-    for comp in &size_data.component_sizes {
-        if comp.precision == 0 || comp.vertical_resolution == 0 || comp.horizontal_resolution == 0 {
-            bail!(ValidationError::InvalidComponentMetadata);
-        }
-    }
-
-    Ok(size_data)
-}
-
-fn size_marker_inner(reader: &mut BitReader<'_>) -> Option<SizeData> {
-    let _ = reader.read_u16()?;
-    let _ = reader.read_u16()?;
-
-    let xsiz = reader.read_u32()?;
-    let ysiz = reader.read_u32()?;
-    let x_osiz = reader.read_u32()?;
-    let y_osiz = reader.read_u32()?;
-    let xt_siz = reader.read_u32()?;
-    let yt_siz = reader.read_u32()?;
-    let xto_siz = reader.read_u32()?;
-    let yto_siz = reader.read_u32()?;
-    let csiz = reader.read_u16()?;
-
-    if x_osiz >= xsiz || y_osiz >= ysiz {
-        return None;
     }
 
     if csiz == 0 {
-        return None;
+        bail!(MarkerError::ParseFailure("SIZ"));
     }
 
-    let mut components = Vec::with_capacity(csiz as usize);
+    if csiz > 4 {
+        bail!(ValidationError::Unsupported);
+    }
+
+    if x_osiz != 0 || y_osiz != 0 || xto_siz != 0 || yto_siz != 0 {
+        bail!(ValidationError::Unsupported);
+    }
+
     for _ in 0..csiz {
-        let ssiz = reader.read_byte()?;
-        let x_rsiz = reader.read_byte()?;
-        let y_rsiz = reader.read_byte()?;
+        let ssiz = reader.read_byte().ok_or(MarkerError::ParseFailure("SIZ"))?;
+        let x_rsiz = reader.read_byte().ok_or(MarkerError::ParseFailure("SIZ"))?;
+        let y_rsiz = reader.read_byte().ok_or(MarkerError::ParseFailure("SIZ"))?;
 
-        let precision = (ssiz & 0x7F) + 1;
-        // Signed samples are treated as unsigned, like other decoders do.
-        let _is_signed = (ssiz & 0x80) != 0;
-
-        // In theory up to 38 is allowed, but we don't support more than that.
-        if precision as u32 > BITPLANE_BIT_SIZE {
-            return None;
+        if x_rsiz == 0 || y_rsiz == 0 {
+            bail!(ValidationError::InvalidComponentMetadata);
         }
 
-        components.push(ComponentSizeInfo {
-            precision,
-            horizontal_resolution: x_rsiz,
-            vertical_resolution: y_rsiz,
-        });
+        let precision = (ssiz & 0x7F) + 1;
+        let is_signed = (ssiz & 0x80) != 0;
+
+        if is_signed || precision != 8 || x_rsiz != 1 || y_rsiz != 1 {
+            bail!(ValidationError::Unsupported);
+        }
     }
 
-    // Uniformly subsampled images are decoded at component, not reference-grid, resolution.
-    let mut x_shrink_factor = 1;
-    let mut y_shrink_factor = 1;
-
-    let hr = components[0].horizontal_resolution;
-    let vr = components[0].vertical_resolution;
-    let mut same_resolution = true;
-
-    for component in &components[1..] {
-        same_resolution &= component.horizontal_resolution == hr;
-        same_resolution &= component.vertical_resolution == vr;
-    }
-
-    if same_resolution {
-        x_shrink_factor = hr as u32;
-        y_shrink_factor = vr as u32;
-    }
-
-    Some(SizeData {
+    Ok(SizeData {
         reference_grid_width: xsiz,
         reference_grid_height: ysiz,
-        image_area_x_offset: x_osiz,
-        image_area_y_offset: y_osiz,
         tile_width: xt_siz,
         tile_height: yt_siz,
-        tile_x_offset: xto_siz,
-        tile_y_offset: yto_siz,
-        component_sizes: components,
-        x_shrink_factor,
-        y_shrink_factor,
-        x_resolution_shrink_factor: 1,
-        y_resolution_shrink_factor: 1,
+        num_components: csiz,
+        resolution_shrink_factor: 1,
     })
 }
 

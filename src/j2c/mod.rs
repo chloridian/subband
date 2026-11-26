@@ -11,8 +11,6 @@ mod segment;
 mod tag_tree;
 mod tile;
 
-use super::jp2::ImageBoxes;
-use super::jp2::colr::{ColorSpace, ColorSpecificationBox, EnumeratedColorspace};
 use crate::error::{FormatError, MarkerError, Result, bail};
 use crate::j2c::codestream::markers;
 use crate::reader::BitReader;
@@ -32,13 +30,12 @@ pub(crate) struct ParsedCodestream<'a> {
 #[derive(Debug, Clone)]
 pub struct ComponentData {
     pub(crate) container: SimdBuffer<{ SIMD_WIDTH }>,
-    pub(crate) bit_depth: u8,
 }
 
 impl ComponentData {
     /// The bit depth of this component.
     pub fn bit_depth(&self) -> u8 {
-        self.bit_depth
+        8
     }
 
     /// The decoded samples of this component.
@@ -54,14 +51,12 @@ pub(crate) fn parse<'a>(
 ) -> Result<Image<'a>> {
     let parsed_codestream = parse_raw(stream, settings)?;
     let header = &parsed_codestream.header;
-    let mut boxes = ImageBoxes::default();
 
     let (color_space, has_alpha) = if let Some(channels) = color_channels {
         let color_space = match channels {
             1 => crate::ColorSpace::Gray,
             3 => crate::ColorSpace::RGB,
-            4 => crate::ColorSpace::CMYK,
-            num_channels => crate::ColorSpace::Unknown { num_channels },
+            _ => bail!(FormatError::Unsupported),
         };
 
         (
@@ -69,39 +64,12 @@ pub(crate) fn parse<'a>(
             header.component_infos.len() == usize::from(channels) + 1,
         )
     } else {
-        // Three components with subsampled chroma are practically always YCbCr.
-        let subsampling = |c: &codestream::ComponentInfo| {
-            (
-                c.size_info.horizontal_resolution,
-                c.size_info.vertical_resolution,
-            )
-        };
-        let has_subsampled_chroma = matches!(
-            header.component_infos.as_slice(),
-            [y, cb, cr] if {
-                let (y, cb, cr) = (subsampling(y), subsampling(cb), subsampling(cr));
-
-                cb == cr && cb != y && cb.0 >= y.0 && cb.1 >= y.1
-            }
-        );
-
-        let cs = if header.component_infos.len() < 3 {
-            ColorSpace::Enumerated(EnumeratedColorspace::Greyscale)
-        } else if has_subsampled_chroma {
-            ColorSpace::Enumerated(EnumeratedColorspace::Sycc)
-        } else {
-            ColorSpace::Enumerated(EnumeratedColorspace::Srgb)
-        };
-
-        boxes.color_specification = Some(ColorSpecificationBox { color_space: cs });
-
-        resolve_alpha_and_color_space(&boxes, &parsed_codestream.header, settings)?
+        resolve_alpha_and_color_space(&parsed_codestream.header)?
     };
 
     Ok(Image {
         codestream: parsed_codestream.data,
         header: parsed_codestream.header,
-        boxes,
         settings: settings.clone(),
         color_space,
         has_alpha,

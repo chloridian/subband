@@ -57,7 +57,7 @@ pub(crate) fn decode<'a>(
         )?;
     }
 
-    apply_sign_shift(&mut ctx.channel_data, &header.component_infos, cancel)?;
+    apply_sign_shift(&mut ctx.channel_data, cancel)?;
 
     Ok(())
 }
@@ -85,12 +85,11 @@ impl DecoderContext<'_> {
             .checked_mul(header.size_data.image_height() as usize)
             .ok_or(ValidationError::ImageTooLarge)?;
         // TODO: SIMD Buffers should be reused across runs!
-        for info in &initial_tile.component_infos {
+        for _ in &initial_tile.component_infos {
             cancel.check()?;
 
             self.channel_data.push(ComponentData {
                 container: SimdBuffer::zeros(sample_count),
-                bit_depth: info.size_info.precision,
             });
         }
 
@@ -299,10 +298,10 @@ fn decode_sub_band_bitplanes(
                     SubBandType::HighHigh => 2,
                 };
 
-                component_info.size_info.precision as u16 + log_gain
+                8 + log_gain
             };
 
-            crate::math::pow2i(r_b as i32 - exponent as i32) * (1.0 + (mantissa as f32) / 2048.0)
+            crate::math::pow2i(r_b - exponent as i32) * (1.0 + (mantissa as f32) / 2048.0)
         }
     };
 
@@ -373,19 +372,14 @@ fn decode_sub_band_bitplanes(
     Ok(())
 }
 
-fn apply_sign_shift(
-    channel_data: &mut [ComponentData],
-    component_infos: &[ComponentInfo],
-    cancel: Cancel<'_>,
-) -> Result<()> {
+fn apply_sign_shift(channel_data: &mut [ComponentData], cancel: Cancel<'_>) -> Result<()> {
     use crate::math::{Level, dispatch, f32x8};
 
-    for (channel, component_info) in channel_data.iter_mut().zip(component_infos.iter()) {
+    for channel in channel_data.iter_mut() {
         cancel.check()?;
 
-        let offset = (1_u32 << (component_info.size_info.precision - 1)) as f32;
         dispatch!(Level::new(), simd => {
-            let offset_v = f32x8::splat(simd, offset);
+            let offset_v = f32x8::splat(simd, 128.0);
             for chunk in channel.container.as_chunks_mut::<8>().0 {
                 let v = f32x8::from_slice(simd, chunk);
                 (v + offset_v).store(chunk);
@@ -416,90 +410,21 @@ fn store<'a>(
         return Ok(());
     }
 
-    let (scale_x, scale_y) = (
-        component_info.size_info.horizontal_resolution,
-        component_info.size_info.vertical_resolution,
-    );
+    let input_row_iter = idwt_output
+        .coefficients
+        .chunks_exact(idwt_output.rect.width() as usize)
+        .take(idwt_output.rect.height() as usize);
 
-    let (image_x_offset, image_y_offset) = (
-        header.size_data.image_x_offset(),
-        header.size_data.image_y_offset(),
-    );
+    let output_row_iter = channel_data
+        .container
+        .chunks_exact_mut(header.size_data.image_width() as usize)
+        .skip(resolution_tile.rect.y0 as usize);
 
-    if scale_x == 1 && scale_y == 1 {
-        let skip_x = image_x_offset.saturating_sub(idwt_output.rect.x0);
-        let skip_y = image_y_offset.saturating_sub(idwt_output.rect.y0);
+    for (input_row, output_row) in input_row_iter.zip(output_row_iter) {
+        cancel.check()?;
 
-        let input_row_iter = idwt_output
-            .coefficients
-            .chunks_exact(idwt_output.rect.width() as usize)
-            .skip(skip_y as usize)
-            .take(idwt_output.rect.height() as usize);
-
-        let output_row_iter = channel_data
-            .container
-            .chunks_exact_mut(header.size_data.image_width() as usize)
-            .skip(resolution_tile.rect.y0.saturating_sub(image_y_offset) as usize);
-
-        for (input_row, output_row) in input_row_iter.zip(output_row_iter) {
-            cancel.check()?;
-
-            let input_row = &input_row[skip_x as usize..];
-            let output_row = &mut output_row
-                [resolution_tile.rect.x0.saturating_sub(image_x_offset) as usize..]
-                [..input_row.len()];
-
-            output_row.copy_from_slice(input_row);
-        }
-    } else {
-        let image_width = header.size_data.image_width();
-        let image_height = header.size_data.image_height();
-
-        let x_shrink_factor = header.size_data.x_shrink_factor;
-        let y_shrink_factor = header.size_data.y_shrink_factor;
-
-        let first_x = (tile.rect.x0 == header.size_data.image_area_x_offset)
-            .then_some(resolution_tile.rect.x0);
-        let first_y = (tile.rect.y0 == header.size_data.image_area_y_offset)
-            .then_some(resolution_tile.rect.y0);
-
-        for y in resolution_tile.rect.y0..resolution_tile.rect.y1 {
-            cancel.check()?;
-
-            let relative_y = (y - idwt_output.rect.y0) as usize;
-            let reference_grid_y = if first_y == Some(y) {
-                image_y_offset
-            } else {
-                (scale_y as u32 * y) / y_shrink_factor
-            };
-            let y_end = (scale_y as u32 * (y + 1)) / y_shrink_factor;
-
-            for x in resolution_tile.rect.x0..resolution_tile.rect.x1 {
-                let relative_x = (x - idwt_output.rect.x0) as usize;
-                let reference_grid_x = if first_x == Some(x) {
-                    image_x_offset
-                } else {
-                    (scale_x as u32 * x) / x_shrink_factor
-                };
-                let x_end = (scale_x as u32 * (x + 1)) / x_shrink_factor;
-
-                let sample = idwt_output.coefficients
-                    [relative_y * idwt_output.rect.width() as usize + relative_x];
-
-                for x_position in u32::max(reference_grid_x, image_x_offset)
-                    ..u32::min(x_end, image_width + image_x_offset)
-                {
-                    for y_position in u32::max(reference_grid_y, image_y_offset)
-                        ..u32::min(y_end, image_height + image_y_offset)
-                    {
-                        let pos = (y_position - image_y_offset) as usize * image_width as usize
-                            + (x_position - image_x_offset) as usize;
-
-                        channel_data.container[pos] = sample;
-                    }
-                }
-            }
-        }
+        let output_row = &mut output_row[resolution_tile.rect.x0 as usize..][..input_row.len()];
+        output_row.copy_from_slice(input_row);
     }
 
     Ok(())

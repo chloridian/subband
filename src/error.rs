@@ -62,8 +62,6 @@ pub enum TileError {
     Invalid,
     /// Invalid tile index in tile-part header.
     InvalidIndex,
-    /// Invalid tile or image offsets.
-    InvalidOffsets,
     /// PPT marker present when PPM marker exists in main header.
     PpmPptConflict,
 }
@@ -75,8 +73,6 @@ pub enum ValidationError {
     InvalidDimensions,
     /// Image dimensions exceed supported limits.
     ImageTooLarge,
-    /// Image has too many channels.
-    TooManyChannels,
     /// Invalid component metadata.
     InvalidComponentMetadata,
     /// Invalid progression order.
@@ -93,6 +89,8 @@ pub enum ValidationError {
     MissingStepSize,
     /// Invalid quantization exponents.
     InvalidExponents,
+    /// Valid codestream feature outside the texture profile.
+    Unsupported,
 }
 
 /// Errors related to decoding operations.
@@ -119,12 +117,6 @@ pub enum DecodingError {
 pub enum ColorError {
     /// Multi-component transform failed.
     Mct,
-    /// Failed to resolve palette indices.
-    PaletteResolutionFailed,
-    /// Failed to convert from sYCC to RGB.
-    SyccConversionFailed,
-    /// Failed to convert from LAB to RGB.
-    LabConversionFailed,
 }
 
 impl fmt::Display for DecodeError {
@@ -176,7 +168,6 @@ impl fmt::Display for TileError {
         match self {
             Self::Invalid => write!(f, "image contains no tiles"),
             Self::InvalidIndex => write!(f, "invalid tile index in tile-part header"),
-            Self::InvalidOffsets => write!(f, "invalid tile offsets"),
             Self::PpmPptConflict => {
                 write!(
                     f,
@@ -192,7 +183,6 @@ impl fmt::Display for ValidationError {
         match self {
             Self::InvalidDimensions => write!(f, "invalid image dimensions"),
             Self::ImageTooLarge => write!(f, "image is too large"),
-            Self::TooManyChannels => write!(f, "image has too many channels"),
             Self::InvalidComponentMetadata => write!(f, "invalid component metadata"),
             Self::InvalidProgressionOrder => write!(f, "invalid progression order"),
             Self::InvalidTransformation => write!(f, "invalid transformation type"),
@@ -205,6 +195,7 @@ impl fmt::Display for ValidationError {
             }
             Self::MissingStepSize => write!(f, "missing exponent step size"),
             Self::InvalidExponents => write!(f, "invalid quantization exponents"),
+            Self::Unsupported => write!(f, "unsupported texture profile feature"),
         }
     }
 }
@@ -231,9 +222,6 @@ impl fmt::Display for ColorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Mct => write!(f, "multi-component transform failed"),
-            Self::PaletteResolutionFailed => write!(f, "failed to resolve palette indices"),
-            Self::SyccConversionFailed => write!(f, "failed to convert from sYCC to RGB"),
-            Self::LabConversionFailed => write!(f, "failed to convert from LAB to RGB"),
         }
     }
 }

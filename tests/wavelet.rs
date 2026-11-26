@@ -61,42 +61,6 @@ fn reduced_lowest() {
 }
 
 #[test]
-fn reduced_subsampled() {
-    check_with(
-        "codestream_subsampling_with_offset",
-        DecodeSettings {
-            target_resolution: Some((12, 16)),
-            ..Default::default()
-        },
-        reference("wavelet_reduced_subsampled"),
-    );
-}
-
-#[test]
-fn reduced_offset() {
-    check_with(
-        "codestream_offset_large",
-        DecodeSettings {
-            target_resolution: Some((32, 24)),
-            ..Default::default()
-        },
-        reference("wavelet_reduced_offset"),
-    );
-}
-
-#[test]
-fn reduced_precinct_limited() {
-    check_with(
-        "wavelet_reduced_precinct_limited",
-        DecodeSettings {
-            target_resolution: Some((4, 6)),
-            ..Default::default()
-        },
-        reference("wavelet_reduced_precinct_limited"),
-    );
-}
-
-#[test]
 fn reduced_target_larger_than_image() {
     check_with(
         "codestream_gray",
@@ -105,18 +69,6 @@ fn reduced_target_larger_than_image() {
             ..Default::default()
         },
         reference("main_r"),
-    );
-}
-
-#[test]
-fn reduced_palette() {
-    check_with(
-        "palette_small",
-        DecodeSettings {
-            target_resolution: Some((1, 1)),
-            ..Default::default()
-        },
-        reference("palette_small"),
     );
 }
 
