@@ -1,6 +1,6 @@
 use crate::error::{Cancelled, Result};
 use core::fmt;
-use core::result::Result as CoreResult;
+use core::result;
 use std::sync::Arc;
 use std::vec::Vec;
 
@@ -46,7 +46,7 @@ impl Cancel<'_> {
     }
 
     #[inline(always)]
-    pub(crate) fn check(self) -> CoreResult<(), Cancelled> {
+    pub(crate) fn check(self) -> result::Result<(), Cancelled> {
         if self.is_cancelled() {
             Err(Cancelled)
         } else {

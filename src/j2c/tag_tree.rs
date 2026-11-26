@@ -46,22 +46,24 @@ impl TagNode {
         let top_left_width = tag.top_left_width();
         let top_left_height = tag.top_left_height();
 
-        let mut push = |node: Self, child_idx: usize, nodes: &mut Vec<Self>| {
+        let push = |node: Self, nodes: &mut Vec<Self>| -> usize {
             if node.width > 0 && node.height > 0 {
                 let node_idx = nodes.len();
                 nodes.push(node);
-                tag.children[child_idx] = node_idx;
+                node_idx
+            } else {
+                usize::MAX
             }
         };
 
         let n1 = Self::build(top_left_width, top_left_height, level - 1, nodes);
-        push(n1, 0, nodes);
+        let c0 = push(n1, nodes);
 
         let n2 = Self::build(width - top_left_width, top_left_height, level - 1, nodes);
-        push(n2, 1, nodes);
+        let c1 = push(n2, nodes);
 
         let n3 = Self::build(top_left_width, height - top_left_height, level - 1, nodes);
-        push(n3, 2, nodes);
+        let c2 = push(n3, nodes);
 
         let n4 = Self::build(
             width - top_left_width,
@@ -69,7 +71,9 @@ impl TagNode {
             level - 1,
             nodes,
         );
-        push(n4, 3, nodes);
+        let c3 = push(n4, nodes);
+
+        tag.children = [c0, c1, c2, c3];
 
         tag
     }
@@ -84,7 +88,7 @@ fn read_tag_node(
     max_val: u32,
     nodes: &mut [TagNode],
 ) -> Option<u32> {
-    let node = &mut nodes[node_idx];
+    let node = nodes.get_mut(node_idx)?;
 
     if !node.initialized {
         let mut val = u32::max(parent_val, node.value);

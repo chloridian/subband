@@ -70,8 +70,10 @@ fn parse_packet<'a>(
 ) -> Option<()> {
     let progression_data = progression_iterator.next()?;
     let resolution = progression_data.resolution;
-    let component_info = &component_infos[progression_data.component as usize];
-    let tile_decompositions = &mut storage.tile_decompositions[progression_data.component as usize];
+    let component_info = component_infos.get(progression_data.component as usize)?;
+    let tile_decompositions = storage
+        .tile_decompositions
+        .get_mut(progression_data.component as usize)?;
     let sub_band_iter = tile_decompositions.sub_band_iter(resolution, &storage.decompositions);
 
     let body_reader = tile_part.body();
@@ -111,17 +113,21 @@ fn parse_packet<'a>(
 
     if !zero_length {
         for sub_band in sub_band_iter {
-            let sub_band = &mut storage.sub_bands[sub_band];
-            let precinct = &mut storage.precincts[sub_band.precincts.clone()]
-                [progression_data.precinct as usize];
-            let code_blocks = &mut storage.code_blocks[precinct.code_blocks.clone()];
+            let sub_band = storage.sub_bands.get_mut(sub_band)?;
+            let precinct = storage
+                .precincts
+                .get_mut(sub_band.precincts.clone())?
+                .get_mut(progression_data.precinct as usize)?;
+            let code_blocks = storage.code_blocks.get_mut(precinct.code_blocks.clone())?;
 
             for code_block in code_blocks {
-                let layer = &mut storage.layers[code_block.layers.clone()]
-                    [progression_data.layer_num as usize];
+                let layer = storage
+                    .layers
+                    .get_mut(code_block.layers.clone())?
+                    .get_mut(progression_data.layer_num as usize)?;
 
                 if let Some(segments) = layer.segments.clone() {
-                    let segments = &mut storage.segments[segments];
+                    let segments = storage.segments.get_mut(segments)?;
 
                     for segment in segments {
                         segment.data = body_reader.read_bytes(segment.data_length as usize)?;
@@ -143,10 +149,10 @@ fn resolve_segments(
 ) -> Option<()> {
     const MAX_CODING_PASSES: u8 = 1 + 3 * (MAX_BITPLANE_COUNT - 1);
 
-    let sub_band = &storage.sub_bands[sub_band_dx];
-    let precincts = &mut storage.precincts[sub_band.precincts.clone()];
+    let sub_band = storage.sub_bands.get(sub_band_dx)?;
+    let precincts = storage.precincts.get_mut(sub_band.precincts.clone())?;
     let precinct = precincts.get_mut(progression_data.precinct as usize)?;
-    let code_blocks = &mut storage.code_blocks[precinct.code_blocks.clone()];
+    let code_blocks = storage.code_blocks.get_mut(precinct.code_blocks.clone())?;
 
     for code_block in code_blocks {
         let is_included = if code_block.has_been_included {
@@ -165,8 +171,10 @@ fn resolve_segments(
             continue;
         }
 
-        let layer =
-            &mut storage.layers[code_block.layers.clone()][progression_data.layer_num as usize];
+        let layer = storage
+            .layers
+            .get_mut(code_block.layers.clone())?
+            .get_mut(progression_data.layer_num as usize)?;
 
         let included_first_time = is_included && !code_block.has_been_included;
 

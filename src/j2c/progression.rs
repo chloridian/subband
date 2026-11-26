@@ -73,8 +73,12 @@ impl<'a> IteratorInput<'a> {
     }
 
     fn max_resolution(&self, component_idx: u8) -> u8 {
-        self.total_max_resolution()
-            .min(self.tile.component_infos[component_idx as usize].num_resolution_levels())
+        self.tile
+            .component_infos
+            .get(component_idx as usize)
+            .map_or(0, |c| {
+                self.total_max_resolution().min(c.num_resolution_levels())
+            })
     }
 
     fn min_comp(&self) -> u8 {
@@ -109,7 +113,11 @@ impl<'a> IteratorInput<'a> {
             return 0;
         }
 
-        ResolutionTile::new(component_tiles[component_idx as usize], resolution).num_precincts()
+        let Some(&component_tile) = component_tiles.get(component_idx as usize) else {
+            return 0;
+        };
+
+        ResolutionTile::new(component_tile, resolution).num_precincts()
     }
 }
 
@@ -292,7 +300,7 @@ fn position_progression_common<'a>(
     let mut elements = vec![];
 
     for component_idx in input.min_comp()..input.max_comp() {
-        let component_tile = component_tiles[component_idx as usize];
+        let component_tile = *component_tiles.get(component_idx as usize)?;
 
         for resolution in input.min_resolution()..input.max_resolution(component_idx) {
             let resolution_tile = ResolutionTile::new(component_tile, resolution);

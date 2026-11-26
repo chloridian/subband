@@ -144,18 +144,20 @@ pub(crate) fn read_header<'a>(
     let cod = cod.ok_or(DecodeError::Malformed)?;
     let qcd = qcd.ok_or(DecodeError::Malformed)?;
 
-    let component_infos: Vec<ComponentInfo> = (0..num_components as usize)
-        .map(|idx| ComponentInfo {
-            coding_style: cod_components[idx]
-                .clone()
+    let component_infos: Vec<ComponentInfo> = cod_components
+        .into_iter()
+        .zip(qcd_components)
+        .zip(roi_shifts)
+        .map(|((cod_c, qcd_c), roi_shift)| ComponentInfo {
+            coding_style: cod_c
                 .map(|mut c| {
                     c.flags.raw |= cod.component_parameters.flags.raw;
 
                     c
                 })
-                .unwrap_or(cod.component_parameters.clone()),
-            quantization_info: qcd_components[idx].clone().unwrap_or(qcd.clone()),
-            roi_shift: roi_shifts[idx],
+                .unwrap_or_else(|| cod.component_parameters.clone()),
+            quantization_info: qcd_c.unwrap_or_else(|| qcd.clone()),
+            roi_shift,
         })
         .collect();
 
@@ -165,7 +167,7 @@ pub(crate) fn read_header<'a>(
         .iter()
         .map(|c| c.num_resolution_levels())
         .min()
-        .unwrap();
+        .ok_or(DecodeError::Malformed)?;
     let skipped_resolution_levels =
         if let Some((target_width, target_height)) = settings.target_resolution {
             let width_log = size_data
@@ -229,7 +231,10 @@ pub(crate) fn validate_resource_limits(
             let shift = u32::from(n_l - r);
             let w_r = u64::from(size_data.reference_grid_width).div_ceil(1_u64 << shift);
             let h_r = u64::from(size_data.reference_grid_height).div_ceil(1_u64 << shift);
-            let (ppx, ppy) = params.precinct_exponents[r as usize];
+            let &(ppx, ppy) = params
+                .precinct_exponents
+                .get(r as usize)
+                .ok_or(DecodeError::Malformed)?;
 
             let precincts_r = w_r
                 .div_ceil(1_u64 << ppx)

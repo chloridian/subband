@@ -76,6 +76,7 @@ impl<'a> ArithmeticDecoder<'a> {
     }
 
     #[inline(always)]
+    #[expect(clippy::indexing_slicing)]
     pub(crate) fn decode(&mut self, context: &mut ArithmeticDecoderContext) -> u32 {
         let qe_entry = &QE_TABLE[context.index() as usize];
 

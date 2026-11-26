@@ -47,13 +47,18 @@ impl<'a> TilePart<'a> {
         match self {
             TilePart::Merged(m) => &mut m.data,
             TilePart::Separated(s) => {
-                if s.headers[s.active_header_reader].at_end()
-                    && s.headers.len() - 1 > s.active_header_reader
+                if let Some(active) = s.headers.get(s.active_header_reader)
+                    && active.at_end()
+                    && s.active_header_reader + 1 < s.headers.len()
                 {
                     s.active_header_reader += 1;
                 }
 
-                &mut s.headers[s.active_header_reader]
+                if let Some(reader) = s.headers.get_mut(s.active_header_reader) {
+                    reader
+                } else {
+                    &mut s.body
+                }
             }
         }
     }
@@ -179,7 +184,9 @@ fn parse_tile_part<'a>(
 
     let start = reader.offset();
 
-    let tile = &mut tiles[tile_part_header.tile_index as usize];
+    let tile = tiles
+        .get_mut(tile_part_header.tile_index as usize)
+        .ok_or(DecodeError::Malformed)?;
     if tile.tile_parts.len() >= MAX_TILE_PARTS_PER_TILE {
         bail!(DecodeError::TooLarge);
     }
@@ -479,8 +486,9 @@ impl<'a> ResolutionTile<'a> {
             .component_info
             .coding_style
             .parameters
-            .precinct_exponents[self.resolution as usize]
-            .0
+            .precinct_exponents
+            .get(self.resolution as usize)
+            .map_or(15, |p| p.0)
     }
 
     fn precinct_exponent_y(&self) -> u8 {
@@ -488,8 +496,9 @@ impl<'a> ResolutionTile<'a> {
             .component_info
             .coding_style
             .parameters
-            .precinct_exponents[self.resolution as usize]
-            .1
+            .precinct_exponents
+            .get(self.resolution as usize)
+            .map_or(15, |p| p.1)
     }
 
     fn num_precincts_x(&self) -> u32 {
@@ -706,7 +715,7 @@ mod tests {
         assert_eq!(size_data.image_height(), 720);
         assert_eq!(size_data.num_x_tiles(), 4);
         assert_eq!(size_data.num_y_tiles(), 3);
-        assert_eq!(size_data.num_tiles().unwrap(), 12);
+        assert_eq!(size_data.num_tiles(), Ok(12));
 
         let header = Header {
             size_data,

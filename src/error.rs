@@ -1,6 +1,6 @@
 use core::error::Error;
 use core::fmt;
-use core::result::Result as CoreResult;
+use core::result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
@@ -39,7 +39,7 @@ impl From<Cancelled> for DecodeError {
     }
 }
 
-pub type Result<T> = CoreResult<T, DecodeError>;
+pub type Result<T> = result::Result<T, DecodeError>;
 
 macro_rules! bail {
     ($err:expr) => {

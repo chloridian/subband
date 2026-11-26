@@ -48,9 +48,9 @@ fn decode_inner(
     let mut last_segment_idx = 0;
     let mut coding_passes = 0;
 
-    for layer in &storage.layers[code_block.layers.start..code_block.layers.end] {
+    for layer in storage.layers.get(code_block.layers.clone())? {
         if let Some(range) = layer.segments.clone() {
-            let layer_segments = &storage.segments[range];
+            let layer_segments = storage.segments.get(range)?;
             for segment in layer_segments {
                 if segment.idx != last_segment_idx {
                     assert_eq!(segment.idx, last_segment_idx + 1);
@@ -90,13 +90,20 @@ fn decode_inner(
             handle_coding_passes(0, end, ctx, &mut decoder)?;
         }
     } else {
-        for segment in 0..bp_buffers.segment_coding_passes.len() - 1 {
-            let start_coding_pass = bp_buffers.segment_coding_passes[segment];
-            let end_coding_pass =
-                bp_buffers.segment_coding_passes[segment + 1].min(ctx.max_coding_passes);
+        for (passes, ranges) in bp_buffers
+            .segment_coding_passes
+            .windows(2)
+            .zip(bp_buffers.segment_ranges.windows(2))
+        {
+            let [start_coding_pass, end_coding_pass] = *passes else {
+                continue;
+            };
+            let [range_start, range_end] = *ranges else {
+                continue;
+            };
+            let end_coding_pass = end_coding_pass.min(ctx.max_coding_passes);
 
-            let data = &bp_buffers.combined_layers
-                [bp_buffers.segment_ranges[segment]..bp_buffers.segment_ranges[segment + 1]];
+            let data = bp_buffers.combined_layers.get(range_start..range_end)?;
 
             let use_arithmetic = if ctx.style.selective_arithmetic_coding_bypass {
                 if start_coding_pass <= 9 {
@@ -138,10 +145,10 @@ fn handle_coding_passes(
                 cleanup_pass(ctx, decoder)?;
 
                 if ctx.style.segmentation_symbols {
-                    let b0 = decoder.read_bit(ctx.arithmetic_decoder_context(18))?;
-                    let b1 = decoder.read_bit(ctx.arithmetic_decoder_context(18))?;
-                    let b2 = decoder.read_bit(ctx.arithmetic_decoder_context(18))?;
-                    let b3 = decoder.read_bit(ctx.arithmetic_decoder_context(18))?;
+                    let b0 = decoder.read_bit(ctx.arithmetic_decoder_context(18)?)?;
+                    let b1 = decoder.read_bit(ctx.arithmetic_decoder_context(18)?)?;
+                    let b2 = decoder.read_bit(ctx.arithmetic_decoder_context(18)?)?;
+                    let b3 = decoder.read_bit(ctx.arithmetic_decoder_context(18)?)?;
 
                     if (b0 != 1 || b1 != 0 || b2 != 1 || b3 != 0) && ctx.strict {
                         return None;
@@ -445,28 +452,36 @@ impl BitPlaneDecodeContext {
     pub(crate) fn coefficient_rows(
         &self,
     ) -> impl Iterator<Item = (&[Coefficient], &[CoefficientState])> {
+        let pad = COEFFICIENTS_PADDING as usize;
+        let width = self.width as usize;
+
         self.coefficients
             .chunks_exact(self.padded_width as usize)
             .zip(
                 self.coefficient_states
                     .chunks_exact(self.padded_width as usize),
             )
-            .map(|(coefficients, states)| {
-                (
-                    &coefficients[COEFFICIENTS_PADDING as usize..][..self.width as usize],
-                    &states[COEFFICIENTS_PADDING as usize..][..self.width as usize],
-                )
-            })
-            .skip(COEFFICIENTS_PADDING as usize)
+            .skip(pad)
             .take(self.height as usize)
+            .filter_map(move |(coefficients, states)| {
+                Some((
+                    coefficients.get(pad..)?.get(..width)?,
+                    states.get(pad..)?.get(..width)?,
+                ))
+            })
     }
 
     fn set_sign(&mut self, pos: Position, sign: u8) {
-        self.coefficients[pos.index(self.padded_width)].set_sign(sign);
+        if let Some(coeff) = self.coefficients.get_mut(pos.index(self.padded_width)) {
+            coeff.set_sign(sign);
+        }
     }
 
-    fn arithmetic_decoder_context(&mut self, ctx_label: u8) -> &mut ArithmeticDecoderContext {
-        &mut self.contexts[ctx_label as usize]
+    fn arithmetic_decoder_context(
+        &mut self,
+        ctx_label: u8,
+    ) -> Option<&mut ArithmeticDecoderContext> {
+        self.contexts.get_mut(ctx_label as usize)
     }
 
     fn reset_contexts(&mut self) {
@@ -487,67 +502,125 @@ impl BitPlaneDecodeContext {
 
     #[inline(always)]
     fn is_significant(&self, position: Position) -> bool {
-        self.coefficient_states[position.index(self.padded_width)].is_significant()
+        self.coefficient_states
+            .get(position.index(self.padded_width))
+            .is_some_and(CoefficientState::is_significant)
     }
 
     #[inline(always)]
     fn set_significant(&mut self, position: Position) {
         let idx = position.index(self.padded_width);
-        debug_assert!(!self.coefficient_states[idx].is_significant());
+        if let Some(state) = self.coefficient_states.get_mut(idx) {
+            debug_assert!(!state.is_significant());
+            state.set_significant();
+            state.set_decoded_bit_position(self.current_bit_position);
+        }
 
-        self.coefficient_states[idx].set_significant();
-        self.coefficient_states[idx].set_decoded_bit_position(self.current_bit_position);
-
-        self.neighbor_significances[position.top_left().index(self.padded_width)]
-            .set_bottom_right();
-        self.neighbor_significances[position.top().index(self.padded_width)].set_bottom();
-        self.neighbor_significances[position.top_right().index(self.padded_width)]
-            .set_bottom_left();
-        self.neighbor_significances[position.left().index(self.padded_width)].set_right();
-        self.neighbor_significances[position.right().index(self.padded_width)].set_left();
-        self.neighbor_significances[position.bottom_left().index(self.padded_width)]
-            .set_top_right();
-        self.neighbor_significances[position.bottom().index(self.padded_width)].set_top();
-        self.neighbor_significances[position.bottom_right().index(self.padded_width)]
-            .set_top_left();
+        if let Some(n) = self
+            .neighbor_significances
+            .get_mut(position.top_left().index(self.padded_width))
+        {
+            n.set_bottom_right();
+        }
+        if let Some(n) = self
+            .neighbor_significances
+            .get_mut(position.top().index(self.padded_width))
+        {
+            n.set_bottom();
+        }
+        if let Some(n) = self
+            .neighbor_significances
+            .get_mut(position.top_right().index(self.padded_width))
+        {
+            n.set_bottom_left();
+        }
+        if let Some(n) = self
+            .neighbor_significances
+            .get_mut(position.left().index(self.padded_width))
+        {
+            n.set_right();
+        }
+        if let Some(n) = self
+            .neighbor_significances
+            .get_mut(position.right().index(self.padded_width))
+        {
+            n.set_left();
+        }
+        if let Some(n) = self
+            .neighbor_significances
+            .get_mut(position.bottom_left().index(self.padded_width))
+        {
+            n.set_top_right();
+        }
+        if let Some(n) = self
+            .neighbor_significances
+            .get_mut(position.bottom().index(self.padded_width))
+        {
+            n.set_top();
+        }
+        if let Some(n) = self
+            .neighbor_significances
+            .get_mut(position.bottom_right().index(self.padded_width))
+        {
+            n.set_top_left();
+        }
     }
 
     #[inline(always)]
     fn set_zero_coded(&mut self, position: Position) {
-        self.coefficient_states[position.index(self.padded_width)].set_zero_coded(1);
+        if let Some(state) = self
+            .coefficient_states
+            .get_mut(position.index(self.padded_width))
+        {
+            state.set_zero_coded(1);
+        }
     }
 
     #[inline(always)]
     fn set_magnitude_refined(&mut self, position: Position) {
-        let state = &mut self.coefficient_states[position.index(self.padded_width)];
-        state.set_magnitude_refined();
-        state.set_decoded_bit_position(self.current_bit_position);
+        if let Some(state) = self
+            .coefficient_states
+            .get_mut(position.index(self.padded_width))
+        {
+            state.set_magnitude_refined();
+            state.set_decoded_bit_position(self.current_bit_position);
+        }
     }
 
     #[inline(always)]
     fn magnitude_refinement(&self, position: Position) -> u8 {
-        self.coefficient_states[position.index(self.padded_width)].magnitude_refinement()
+        self.coefficient_states
+            .get(position.index(self.padded_width))
+            .map_or(0, CoefficientState::magnitude_refinement)
     }
 
     #[inline(always)]
     fn should_decode_cleanup(&self, position: Position) -> bool {
-        self.coefficient_states[position.index(self.padded_width)].should_decode_cleanup()
+        self.coefficient_states
+            .get(position.index(self.padded_width))
+            .is_some_and(CoefficientState::should_decode_cleanup)
     }
 
     #[inline(always)]
     fn should_decode_refinement(&self, position: Position) -> bool {
-        self.coefficient_states[position.index(self.padded_width)].should_decode_refinement()
+        self.coefficient_states
+            .get(position.index(self.padded_width))
+            .is_some_and(CoefficientState::should_decode_refinement)
     }
 
     #[inline(always)]
     fn push_magnitude_bit(&mut self, position: Position, bit: u32) {
         let idx = position.index(self.padded_width);
-        self.coefficients[idx].push_bit_at(bit, self.current_bit_position);
+        if let Some(coeff) = self.coefficients.get_mut(idx) {
+            coeff.push_bit_at(bit, self.current_bit_position);
+        }
     }
 
     #[inline(always)]
     fn sign(&self, position: Position) -> u8 {
-        self.coefficients[position.index(self.padded_width)].sign() as u8
+        self.coefficients
+            .get(position.index(self.padded_width))
+            .map_or(0, |c| c.sign() as u8)
     }
 
     #[inline(always)]
@@ -558,7 +631,12 @@ impl BitPlaneDecodeContext {
 
     #[inline(always)]
     fn neighborhood_significance_states(&self, pos: Position) -> u8 {
-        let neighbors = &self.neighbor_significances[pos.index(self.padded_width)];
+        let Some(neighbors) = self
+            .neighbor_significances
+            .get(pos.index(self.padded_width))
+        else {
+            return 0;
+        };
 
         if self.style.vertically_causal_context && self.neighbor_in_next_stripe(pos) {
             neighbors.all_without_bottom()
@@ -592,7 +670,7 @@ fn cleanup_pass(ctx: &mut BitPlaneDecodeContext, decoder: &mut impl BitDecoder) 
                     )) == 0;
 
                 let bit = if use_rl {
-                    let bit = decoder.read_bit(ctx.arithmetic_decoder_context(17))?;
+                    let bit = decoder.read_bit(ctx.arithmetic_decoder_context(17)?)?;
 
                     if bit == 0 {
                         for _ in 0..3 {
@@ -602,9 +680,9 @@ fn cleanup_pass(ctx: &mut BitPlaneDecodeContext, decoder: &mut impl BitDecoder) 
                         return Some(());
                     } else {
                         let mut num_zeroes =
-                            decoder.read_bit(ctx.arithmetic_decoder_context(18))?;
+                            decoder.read_bit(ctx.arithmetic_decoder_context(18)?)?;
                         num_zeroes = (num_zeroes << 1)
-                            | decoder.read_bit(ctx.arithmetic_decoder_context(18))?;
+                            | decoder.read_bit(ctx.arithmetic_decoder_context(18)?)?;
 
                         for _ in 0..num_zeroes {
                             cur_pos.index_y += 1;
@@ -614,7 +692,7 @@ fn cleanup_pass(ctx: &mut BitPlaneDecodeContext, decoder: &mut impl BitDecoder) 
                     }
                 } else {
                     let ctx_label = context_label_zero_coding(*cur_pos, ctx);
-                    decoder.read_bit(ctx.arithmetic_decoder_context(ctx_label))?
+                    decoder.read_bit(ctx.arithmetic_decoder_context(ctx_label)?)?
                 };
 
                 if bit == 1 {
@@ -641,7 +719,7 @@ fn significance_propagation_pass(
             if !ctx.is_significant(*cur_pos) && ctx.neighborhood_significance_states(*cur_pos) != 0
             {
                 let ctx_label = context_label_zero_coding(*cur_pos, ctx);
-                let bit = decoder.read_bit(ctx.arithmetic_decoder_context(ctx_label))?;
+                let bit = decoder.read_bit(ctx.arithmetic_decoder_context(ctx_label)?)?;
                 ctx.set_zero_coded(*cur_pos);
 
                 if bit == 1 {
@@ -667,7 +745,7 @@ fn magnitude_refinement_pass(
         |cur_pos| {
             if ctx.should_decode_refinement(*cur_pos) {
                 let ctx_label = context_label_magnitude_refinement_coding(*cur_pos, ctx);
-                let bit = decoder.read_bit(ctx.arithmetic_decoder_context(ctx_label))?;
+                let bit = decoder.read_bit(ctx.arithmetic_decoder_context(ctx_label)?)?;
                 if bit == 1 {
                     ctx.push_magnitude_bit(*cur_pos, bit);
                 }
@@ -796,11 +874,14 @@ fn decode_sign_bit<T: BitDecoder>(
         let positive_significances = significances & !signs;
         let merged_significances = (negative_significances << 1) | positive_significances;
 
-        SIGN_CONTEXT_LOOKUP[merged_significances as usize]
+        SIGN_CONTEXT_LOOKUP
+            .get(merged_significances as usize)
+            .copied()
+            .unwrap_or((0, 0))
     }
 
     let (ctx_label, xor_bit) = context_label_sign_coding(pos, ctx);
-    let ad_ctx = ctx.arithmetic_decoder_context(ctx_label);
+    let ad_ctx = ctx.arithmetic_decoder_context(ctx_label)?;
     let sign_bit = if T::IS_BYPASS {
         decoder.read_bit(ad_ctx)?
     } else {
@@ -813,12 +894,14 @@ fn decode_sign_bit<T: BitDecoder>(
 
 #[inline(always)]
 fn context_label_zero_coding(pos: Position, ctx: &BitPlaneDecodeContext) -> u8 {
-    let neighbors = ctx.neighborhood_significance_states(pos);
+    let neighbors = ctx.neighborhood_significance_states(pos) as usize;
 
     match ctx.sub_band_type {
-        SubBandType::LowLow | SubBandType::LowHigh => ZERO_CTX_LL_LH_LOOKUP[neighbors as usize],
-        SubBandType::HighLow => ZERO_CTX_HL_LOOKUP[neighbors as usize],
-        SubBandType::HighHigh => ZERO_CTX_HH_LOOKUP[neighbors as usize],
+        SubBandType::LowLow | SubBandType::LowHigh => {
+            ZERO_CTX_LL_LH_LOOKUP.get(neighbors).copied().unwrap_or(0)
+        }
+        SubBandType::HighLow => ZERO_CTX_HL_LOOKUP.get(neighbors).copied().unwrap_or(0),
+        SubBandType::HighHigh => ZERO_CTX_HH_LOOKUP.get(neighbors).copied().unwrap_or(0),
     }
 }
 
@@ -1100,9 +1183,12 @@ mod fast_path {
         if !check_flags || (*flags & ((FLAG_SIGNIFICANT_THIS | FLAG_ZERO_CODED_THIS) << shift)) == 0
         {
             if !already_known_significant {
+                #[expect(clippy::indexing_slicing)]
                 let ctx_label =
                     zero_contexts[((*flags >> shift) & FLAG_SIGNIFICANT_NEIGHBORS) as usize];
-                if decoder.read_bit(&mut ctx.contexts[ctx_label as usize]) == 0 {
+                #[expect(clippy::indexing_slicing)]
+                let ad_ctx = &mut ctx.contexts[ctx_label as usize];
+                if decoder.read_bit(ad_ctx) == 0 {
                     return;
                 }
             }
@@ -1169,7 +1255,9 @@ mod fast_path {
             && shifted_flags & FLAG_SIGNIFICANT_NEIGHBORS != 0;
 
         if should_propagate {
+            #[expect(clippy::indexing_slicing)]
             let ctx_label = zero_contexts[(shifted_flags & FLAG_SIGNIFICANT_NEIGHBORS) as usize];
+            #[expect(clippy::indexing_slicing)]
             let bit = decoder.read_bit(&mut ctx.contexts[ctx_label as usize]);
             *flags |= FLAG_ZERO_CODED_THIS << shift;
 
@@ -1234,12 +1322,14 @@ mod fast_path {
 
         if should_decode_refinement {
             let ctx_label = magnitude_refinement_context(shifted_flags);
+            #[expect(clippy::indexing_slicing)]
             let bit = decoder.read_bit(&mut ctx.contexts[ctx_label as usize]);
             let coefficient_idx =
                 column.coefficient_idx + coefficient_in_stripe as usize * column.stride;
             if bit == 1 {
                 push_magnitude_bit(ctx, coefficient_idx, bit);
             }
+            #[expect(clippy::indexing_slicing)]
             ctx.coefficient_states[coefficient_idx]
                 .set_decoded_bit_position(ctx.current_bit_position);
             *flags |= FLAG_MAGNITUDE_REFINED_THIS << shift;
@@ -1247,6 +1337,7 @@ mod fast_path {
     }
 
     #[inline(always)]
+    #[expect(clippy::indexing_slicing)]
     fn decode_sign_bit(
         ctx: &mut BitPlaneDecodeContext,
         decoder: &mut ArithmeticDecoder<'_>,
@@ -1328,6 +1419,7 @@ mod fast_path {
         let mut flag_base = padding * stride + padding;
         let mut coefficient_base = padding * stride + padding;
 
+        #[expect(clippy::indexing_slicing)]
         for _ in 0..stripe_count {
             for x in 0..width {
                 let flag_idx = flag_base + x;
@@ -1348,16 +1440,19 @@ mod fast_path {
     }
 
     #[inline(always)]
+    #[expect(clippy::indexing_slicing)]
     fn push_magnitude_bit(ctx: &mut BitPlaneDecodeContext, idx: usize, bit: u32) {
         ctx.coefficients[idx].push_bit_at(bit, ctx.current_bit_position);
     }
 
     #[inline(always)]
+    #[expect(clippy::indexing_slicing)]
     fn set_sign(ctx: &mut BitPlaneDecodeContext, idx: usize, sign: u8) {
         ctx.coefficients[idx].set_sign(sign);
     }
 
     #[inline(always)]
+    #[expect(clippy::indexing_slicing)]
     fn set_significant(
         ctx: &mut BitPlaneDecodeContext,
         column: StripeColumn,
@@ -1421,6 +1516,7 @@ mod fast_path {
 
     const SIGN_CONTEXT_STRIPE_LOOKUP: [(u8, u8); 256] = build_sign_context_lookup();
 
+    #[expect(clippy::indexing_slicing)]
     const fn build_sign_context_lookup() -> [(u8, u8); 256] {
         let mut out = [(0, 0); 256];
         let mut lookup = 0;
@@ -1454,6 +1550,7 @@ mod fast_path {
     const ZERO_CTX_HL_STRIPE_LOOKUP: [u8; 512] = build_zero_context_lookup(ZERO_CTX_HL_LOOKUP);
     const ZERO_CTX_HH_STRIPE_LOOKUP: [u8; 512] = build_zero_context_lookup(ZERO_CTX_HH_LOOKUP);
 
+    #[expect(clippy::indexing_slicing)]
     const fn build_zero_context_lookup(source: [u8; 256]) -> [u8; 512] {
         let mut out = [0; 512];
         let mut flags = 0;

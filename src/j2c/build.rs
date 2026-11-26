@@ -44,7 +44,7 @@ fn build_decompositions(
         cancel.resize(&mut storage.coefficients, max_coefficients)?;
     }
 
-    for (component_idx, component_tile) in tile.component_tiles().enumerate() {
+    for (component_tile, &expected_samples) in tile.component_tiles().zip(&component_samples) {
         let mut coefficient_counter = 0_usize;
         let decoded_resolutions =
             component_tile.component_info.num_resolution_levels() - skipped_resolution_levels;
@@ -81,7 +81,7 @@ fn build_decompositions(
             Ok(idx)
         };
 
-        let ll_resolution_tile = resolution_tiles.next().unwrap();
+        let ll_resolution_tile = resolution_tiles.next().ok_or(DecodeError::Malformed)?;
         let first_ll_sub_band = build_sub_band(SubBandType::LowLow, &ll_resolution_tile, storage)?;
 
         for resolution_tile in resolution_tiles {
@@ -105,7 +105,7 @@ fn build_decompositions(
             coefficient_count: coefficient_counter,
         });
 
-        assert_eq!(coefficient_counter, component_samples[component_idx]);
+        assert_eq!(coefficient_counter, expected_samples);
     }
 
     Ok(())

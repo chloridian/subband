@@ -6,7 +6,7 @@ use super::codestream::WaveletTransform;
 use super::decode::{DecompositionStorage, TileDecodeContext};
 use super::rect::IntRect;
 use crate::cancel::Cancel;
-use crate::error::Result;
+use crate::error::{DecodeError, Result};
 use crate::j2c::Header;
 use crate::math::{self, Level, SIMD_WIDTH, Simd, dispatch, f32x8};
 
@@ -36,13 +36,23 @@ pub(crate) fn apply(
     transform: WaveletTransform,
     cancel: Cancel<'_>,
 ) -> Result<()> {
-    let tile_decompositions = &storage.tile_decompositions[component_idx];
+    let tile_decompositions = storage
+        .tile_decompositions
+        .get(component_idx)
+        .ok_or(DecodeError::Malformed)?;
 
-    let mut decompositions = &storage.decompositions[tile_decompositions.decompositions.clone()];
-    decompositions = &decompositions[..decompositions
+    let decompositions = storage
+        .decompositions
+        .get(tile_decompositions.decompositions.clone())
+        .ok_or(DecodeError::Malformed)?;
+    let keep = decompositions
         .len()
-        .saturating_sub(header.skipped_resolution_levels as usize)];
-    let ll_sub_band = &storage.sub_bands[tile_decompositions.first_ll_sub_band];
+        .saturating_sub(header.skipped_resolution_levels as usize);
+    let decompositions = decompositions.get(..keep).ok_or(DecodeError::Malformed)?;
+    let ll_sub_band = storage
+        .sub_bands
+        .get(tile_decompositions.first_ll_sub_band)
+        .ok_or(DecodeError::Malformed)?;
 
     let (scratch_buf, output) = (&mut tile_ctx.idwt_scratch_buffer, &mut tile_ctx.idwt_output);
 
@@ -56,26 +66,33 @@ pub(crate) fn apply(
         (min, max)
     };
 
-    if decompositions.is_empty() {
+    let Some((first, rest)) = decompositions.split_first() else {
         output.coefficients.clear();
-        output
+        let ll_coeffs = storage
             .coefficients
-            .extend_from_slice(&storage.coefficients[ll_sub_band.coefficients.clone()]);
+            .get(ll_sub_band.coefficients.clone())
+            .ok_or(DecodeError::Malformed)?;
+        output.coefficients.extend_from_slice(ll_coeffs);
 
         output.rect = ll_sub_band.rect;
 
         return Ok(());
-    }
+    };
 
-    let (s_min, s_max) = estimate_buffer_size(decompositions.last().unwrap());
+    let last = decompositions.last().ok_or(DecodeError::Malformed)?;
+    let (s_min, s_max) = estimate_buffer_size(last);
     if output.coefficients.len() < s_min {
         output
             .coefficients
             .reserve_exact(s_max - output.coefficients.len());
     }
 
-    if decompositions.len() > 1 {
-        let (s_min, s_max) = estimate_buffer_size(&decompositions[decompositions.len() - 2]);
+    if let Some(prev) = decompositions
+        .len()
+        .checked_sub(2)
+        .and_then(|i| decompositions.get(i))
+    {
+        let (s_min, s_max) = estimate_buffer_size(prev);
 
         if scratch_buf.len() < s_min {
             scratch_buf.reserve_exact(s_max - scratch_buf.len());
@@ -85,19 +102,19 @@ pub(crate) fn apply(
     let mut use_scratch = decompositions.len().is_multiple_of(2);
 
     let mut temp_output = filter_2d(
-        IDWTInput::from_sub_band(ll_sub_band, storage),
+        IDWTInput::from_sub_band(ll_sub_band, storage)?,
         if use_scratch {
             scratch_buf
         } else {
             &mut output.coefficients
         },
-        &decompositions[0],
+        first,
         transform,
         storage,
         cancel,
     )?;
 
-    for decomposition in decompositions.iter().skip(1) {
+    for decomposition in rest {
         use_scratch = !use_scratch;
 
         temp_output = if use_scratch {
@@ -131,10 +148,13 @@ struct IDWTInput<'a> {
 }
 
 impl<'a> IDWTInput<'a> {
-    fn from_sub_band(sub_band: &'a SubBand, storage: &'a DecompositionStorage<'_>) -> Self {
-        IDWTInput {
-            coefficients: &storage.coefficients[sub_band.coefficients.clone()],
-        }
+    fn from_sub_band(sub_band: &'a SubBand, storage: &'a DecompositionStorage<'_>) -> Result<Self> {
+        Ok(IDWTInput {
+            coefficients: storage
+                .coefficients
+                .get(sub_band.coefficients.clone())
+                .ok_or(DecodeError::Malformed)?,
+        })
     }
 
     fn from_output(coefficients: &'a [f32]) -> Self {
@@ -211,9 +231,17 @@ fn interleave_and_filter_horizontal<S: Simd>(
     let width = decomposition.rect.width() as usize;
 
     let ll = input.coefficients;
-    let [hl, lh, hh] = decomposition
-        .sub_bands
-        .map(|idx| &storage.coefficients[storage.sub_bands[idx].coefficients.clone()]);
+    let [hl_idx, lh_idx, hh_idx] = decomposition.sub_bands;
+    let sub_band_coeffs = |idx: usize| -> Result<&[f32]> {
+        let sub_band = storage.sub_bands.get(idx).ok_or(DecodeError::Malformed)?;
+        storage
+            .coefficients
+            .get(sub_band.coefficients.clone())
+            .ok_or(DecodeError::Malformed)
+    };
+    let hl = sub_band_coeffs(hl_idx)?;
+    let lh = sub_band_coeffs(lh_idx)?;
+    let hh = sub_band_coeffs(hh_idx)?;
 
     let num_low = (u1.div_ceil(2) - u0.div_ceil(2)) as usize;
     let num_high = (u1 / 2 - u0 / 2) as usize;
@@ -275,15 +303,36 @@ impl HorizontalFilter {
         for (v, row) in rows.enumerate() {
             cancel.check()?;
 
-            self.low[1..=self.num_low]
-                .copy_from_slice(&low_band[v * self.num_low..][..self.num_low]);
-            self.high[1..=self.num_high]
-                .copy_from_slice(&high_band[v * self.num_high..][..self.num_high]);
+            let low_dst = self
+                .low
+                .get_mut(1..=self.num_low)
+                .ok_or(DecodeError::Malformed)?;
+            let low_src = low_band
+                .get(v * self.num_low..)
+                .and_then(|s| s.get(..self.num_low))
+                .ok_or(DecodeError::Malformed)?;
+            low_dst.copy_from_slice(low_src);
+
+            let high_dst = self
+                .high
+                .get_mut(1..=self.num_high)
+                .ok_or(DecodeError::Malformed)?;
+            let high_src = high_band
+                .get(v * self.num_high..)
+                .and_then(|s| s.get(..self.num_high))
+                .ok_or(DecodeError::Malformed)?;
+            high_dst.copy_from_slice(high_src);
 
             filter_1d(simd, self.transform, self)?;
 
-            let low = &self.low[1..=self.num_low];
-            let high = &self.high[1..=self.num_high];
+            let low = self
+                .low
+                .get(1..=self.num_low)
+                .ok_or(DecodeError::Malformed)?;
+            let high = self
+                .high
+                .get(1..=self.num_high)
+                .ok_or(DecodeError::Malformed)?;
 
             if self.low_first {
                 interleave_row(simd, low, high, row);
@@ -304,14 +353,18 @@ impl<S: Simd> Lifting<S> for HorizontalFilter {
 
     #[inline(always)]
     fn scale_low(&mut self, simd: S, factor: f32) -> Result<()> {
-        scale(simd, &mut self.low[1..=self.num_low], factor);
+        if let Some(dst) = self.low.get_mut(1..=self.num_low) {
+            scale(simd, dst, factor);
+        }
 
         Ok(())
     }
 
     #[inline(always)]
     fn scale_high(&mut self, simd: S, factor: f32) -> Result<()> {
-        scale(simd, &mut self.high[1..=self.num_high], factor);
+        if let Some(dst) = self.high.get_mut(1..=self.num_high) {
+            scale(simd, dst, factor);
+        }
 
         Ok(())
     }
@@ -366,14 +419,25 @@ fn lift_band<S: Simd>(
     f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
     f_scalar: impl Fn(f32, f32, f32) -> f32,
 ) {
-    let last = source.len() - 1;
-    source[0] = source[1];
-    source[last] = source[last - 1];
+    if let [first, second, ..] = source {
+        *first = *second;
+    }
+    if let [.., prev, last] = source {
+        *last = *prev;
+    }
 
-    let len = target.len() - 2;
-    let target = &mut target[1..][..len];
-    let left = &source[1 - offset..][..len];
-    let right = &source[2 - offset..][..len];
+    let Some(len) = target.len().checked_sub(2) else {
+        return;
+    };
+    let Some(target) = target.get_mut(1..).and_then(|s| s.get_mut(..len)) else {
+        return;
+    };
+    let Some(left) = source.get(1 - offset..).and_then(|s| s.get(..len)) else {
+        return;
+    };
+    let Some(right) = source.get(2 - offset..).and_then(|s| s.get(..len)) else {
+        return;
+    };
 
     lift_samples(simd, target, left, right, f_simd, f_scalar);
 }
@@ -381,10 +445,18 @@ fn lift_band<S: Simd>(
 #[inline(always)]
 fn interleave_row<S: Simd>(simd: S, first: &[f32], second: &[f32], output: &mut [f32]) {
     let num_pairs = first.len().min(second.len());
-    let (first_chunks, first_rest) = first[..num_pairs].as_chunks::<SIMD_WIDTH>();
-    let (second_chunks, second_rest) = second[..num_pairs].as_chunks::<SIMD_WIDTH>();
-    let (output_chunks, output_rest) =
-        output[..num_pairs * 2].as_chunks_mut::<{ 2 * SIMD_WIDTH }>();
+    let Some(first_pairs) = first.get(..num_pairs) else {
+        return;
+    };
+    let Some(second_pairs) = second.get(..num_pairs) else {
+        return;
+    };
+    let Some(out_pairs) = output.get_mut(..num_pairs * 2) else {
+        return;
+    };
+    let (first_chunks, first_rest) = first_pairs.as_chunks::<SIMD_WIDTH>();
+    let (second_chunks, second_rest) = second_pairs.as_chunks::<SIMD_WIDTH>();
+    let (output_chunks, output_rest) = out_pairs.as_chunks_mut::<{ 2 * SIMD_WIDTH }>();
 
     for ((f, s), out) in first_chunks.iter().zip(second_chunks).zip(output_chunks) {
         let f = f32x8::from_slice(simd, f);
@@ -399,8 +471,8 @@ fn interleave_row<S: Simd>(simd: S, first: &[f32], second: &[f32], output: &mut 
         *out = [*f, *s];
     }
 
-    if first.len() > num_pairs {
-        output[num_pairs * 2] = first[num_pairs];
+    if let (Some(&val), Some(dst)) = (first.get(num_pairs), output.get_mut(num_pairs * 2)) {
+        *dst = val;
     }
 }
 
@@ -471,19 +543,25 @@ impl VerticalFilter<'_> {
 
             let (rows_before, rest) = self.coefficients.split_at_mut(row * width);
             let (current, rows_after) = rest.split_at_mut(width);
-            let neighbor = |r: usize| {
+            let neighbor = |r: usize| -> Result<&[f32]> {
                 if r < row {
-                    &rows_before[r * width..][..width]
+                    rows_before
+                        .get(r * width..)
+                        .and_then(|s| s.get(..width))
+                        .ok_or(DecodeError::Malformed)
                 } else {
-                    &rows_after[(r - row - 1) * width..][..width]
+                    rows_after
+                        .get((r - row - 1) * width..)
+                        .and_then(|s| s.get(..width))
+                        .ok_or(DecodeError::Malformed)
                 }
             };
 
             lift_samples(
                 simd,
                 current,
-                neighbor(above),
-                neighbor(below),
+                neighbor(above)?,
+                neighbor(below)?,
                 &f_simd,
                 &f_scalar,
             );

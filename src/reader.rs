@@ -81,25 +81,23 @@ impl<'a> BitReader<'a> {
 
     #[inline]
     pub(crate) fn read_u16(&mut self) -> Option<u16> {
-        let bytes = self.read_bytes(2)?;
+        let bytes: [u8; 2] = self.read_bytes(2)?.try_into().ok()?;
 
-        Some(u16::from_be_bytes([bytes[0], bytes[1]]))
+        Some(u16::from_be_bytes(bytes))
     }
 
     #[inline]
     pub(crate) fn read_u32(&mut self) -> Option<u32> {
-        let bytes = self.read_bytes(4)?;
+        let bytes: [u8; 4] = self.read_bytes(4)?.try_into().ok()?;
 
-        Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        Some(u32::from_be_bytes(bytes))
     }
 
     #[inline]
     pub(crate) fn read_u64(&mut self) -> Option<u64> {
-        let bytes = self.read_bytes(8)?;
+        let bytes: [u8; 8] = self.read_bytes(8)?.try_into().ok()?;
 
-        Some(u64::from_be_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]))
+        Some(u64::from_be_bytes(bytes))
     }
 
     #[inline(always)]
@@ -139,7 +137,7 @@ impl<'a> BitReader<'a> {
     }
 
     pub(crate) fn needs_to_read_stuff_bit(&mut self) -> bool {
-        self.bit_pos() == 7 && self.data[self.byte_pos()] == 0xff
+        self.bit_pos() == 7 && self.peek_byte() == Some(0xff)
     }
 
     #[inline]
@@ -160,11 +158,11 @@ impl<'a> BitReader<'a> {
 
     #[inline]
     pub(crate) fn read_marker(&mut self) -> Result<u8> {
-        if self.peek_byte().ok_or(DecodeError::Malformed)? != 0xFF {
+        if self.peek_byte() != Some(0xFF) {
             bail!(DecodeError::Malformed);
         }
 
-        self.read_byte().unwrap();
+        self.read_byte().ok_or(DecodeError::Malformed)?;
         self.read_byte().ok_or(DecodeError::Malformed)
     }
 
