@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use subband::{DecodeError, DecodeSettings, DecoderContext, Image};
 
+const EVEN_CUTS: usize = 64;
+
 const FIXTURES: &[&str] = &[
     "alpha-gradient",
     "gray-4096",
@@ -56,29 +58,31 @@ fn prefix_lengths(data: &[u8], header_end: usize) -> Vec<usize> {
         return (header_end..=data.len()).collect();
     }
 
-    let mut lengths = BTreeSet::new();
-    for len in (header_end..=data.len()).step_by(97) {
-        lengths.insert(len);
-    }
-    lengths.insert(data.len());
+    let span = data.len() - header_end;
+    let mut lengths: BTreeSet<usize> = (0..=EVEN_CUTS)
+        .map(|i| header_end + span * i / EVEN_CUTS)
+        .collect();
 
     let full = subband::inspect(data, &DecodeSettings::default()).expect("full inspect");
     for d in 0..=full.levels() {
         if let Some(end) = full.bytes_for(d, None)
             && end >= header_end
         {
-            lengths.insert(end);
+            lengths.extend([end - 1, end, end + 1]);
         }
         for l in 1..=full.layers() {
             if let Some(end) = full.bytes_for(d, Some(l))
                 && end >= header_end
             {
-                lengths.insert(end);
+                lengths.extend([end - 1, end, end + 1]);
             }
         }
     }
 
-    lengths.into_iter().collect()
+    lengths
+        .into_iter()
+        .filter(|&len| (header_end..=data.len()).contains(&len))
+        .collect()
 }
 
 fn verify_prefixes(name: &str, discard: u8, strict: bool) {

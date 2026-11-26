@@ -90,52 +90,16 @@ fn cod_qcd_in_later_tile_part() {
 
 #[test]
 fn truncated_in_packet_header() {
-    let full = reference("main_r");
-    for strict in [false, true] {
-        let settings = DecodeSettings {
-            strict,
-            ..DecodeSettings::default()
-        };
-        let actual = decode("tile_parts_truncated_in_packet_header", &settings)
-            .unwrap_or_else(|e| panic!("strict={strict}: {e}"));
-        assert_eq!((actual.width, actual.height), (full.width, full.height));
-        assert_eq!(actual.channels, full.channels);
-        for y in 0..full.height as usize {
-            for x in 0..full.width as usize {
-                if y < 48 || x < 64 {
-                    let i = y * full.width as usize + x;
-                    assert_eq!(
-                        actual.samples[i], full.samples[i],
-                        "strict={strict} ({x},{y})"
-                    );
-                }
-            }
-        }
-    }
+    check(
+        "tile_parts_truncated_in_packet_header",
+        reference("tile_parts_truncated_in_packet_header"),
+    );
 }
 
 #[test]
 fn truncated_in_packet_body() {
-    let full = reference("main_r");
-    for strict in [false, true] {
-        let settings = DecodeSettings {
-            strict,
-            ..DecodeSettings::default()
-        };
-        let actual = decode("tile_parts_truncated_in_packet_body", &settings)
-            .unwrap_or_else(|e| panic!("strict={strict}: {e}"));
-        assert_eq!((actual.width, actual.height), (full.width, full.height));
-        assert_eq!(actual.channels, full.channels);
-        for y in 0..full.height as usize {
-            for x in 0..full.width as usize {
-                if y < 48 || x < 64 {
-                    let i = y * full.width as usize + x;
-                    assert_eq!(
-                        actual.samples[i], full.samples[i],
-                        "strict={strict} ({x},{y})"
-                    );
-                }
-            }
-        }
-    }
+    check(
+        "tile_parts_truncated_in_packet_body",
+        reference("tile_parts_truncated_in_packet_body"),
+    );
 }

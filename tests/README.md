@@ -20,6 +20,7 @@ oxipng -o max --nx tests/references/*.png
 - `jp2.rs`: JP2 container unwrapping, box lengths, and header validation.
 - `mct.rs`: reversible and irreversible multi-component transforms.
 - `packets.rs`: progression orders, SOP/EPH markers, PPM/PPT packed headers, POC changes, and empty packets.
+- `prefix.rs`: every fixture decoded from cut prefixes, strict and lenient, with layers received per resolution.
 - `quantization.rs`: reversible and irreversible quantization styles and multi-layer rate control.
 - `roi.rs`: region-of-interest maxshift decoding.
 - `tile_parts.rs`: split and interleaved tile-parts, SOT/Psot/TNsot edge cases, and truncated streams.
