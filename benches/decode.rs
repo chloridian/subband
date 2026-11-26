@@ -56,11 +56,11 @@ fn discard<const DISCARD: u32>(bencher: Bencher<'_, '_>, fixture: &Fixture) {
 #[divan::bench(args = LAYERED, consts = PARTIAL_SIZES)]
 fn partial<const BYTES: usize>(bencher: Bencher<'_, '_>, fixture: &Fixture) {
     let bytes = fixture.bytes;
-    run(bencher, &bytes[..BYTES.min(bytes.len())], false, 2);
+    run(bencher, bytes.get(..BYTES).unwrap_or(bytes), false, 2);
 }
 
 fn run(bencher: Bencher<'_, '_>, data: &[u8], strict: bool, discard: u32) {
-    let image = Image::from_codestream(data, &DecodeSettings::default()).unwrap();
+    let image = Image::from_codestream(data, &DecodeSettings::default()).expect("fixture parses");
     let settings = DecodeSettings {
         strict,
         target_resolution: Some((
@@ -70,8 +70,9 @@ fn run(bencher: Bencher<'_, '_>, data: &[u8], strict: bool, discard: u32) {
         ..DecodeSettings::default()
     };
     bencher.bench_local(|| {
-        let image = Image::from_codestream(black_box(data), &settings).unwrap();
+        let image = Image::from_codestream(black_box(data), &settings).expect("fixture parses");
         let mut ctx = DecoderContext::default();
-        black_box(image.decode(&mut ctx).unwrap().data_u8().unwrap());
+        let decoded = image.decode(&mut ctx).expect("fixture decodes");
+        black_box(decoded.data_u8().expect("not cancelled"));
     });
 }

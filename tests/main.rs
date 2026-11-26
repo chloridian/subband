@@ -1,5 +1,3 @@
-#![expect(clippy::unwrap_used, clippy::indexing_slicing)]
-
 mod cancel;
 mod code_blocks;
 mod codestream;
