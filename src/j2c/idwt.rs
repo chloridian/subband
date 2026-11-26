@@ -3,12 +3,19 @@ use std::vec::Vec;
 
 use super::build::{Decomposition, SubBand};
 use super::codestream::WaveletTransform;
-use super::decode::{DecompositionStorage, TileDecodeContext};
+use super::decode::DecompositionStorage;
 use super::rect::IntRect;
 use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result};
 use crate::j2c::Header;
 use crate::math::{self, Level, SIMD_WIDTH, Simd, dispatch, f32x8};
+
+#[derive(Default)]
+pub(crate) struct IdwtScratch {
+    pub(crate) buffer: Vec<f32>,
+    pub(crate) low_row: Vec<f32>,
+    pub(crate) high_row: Vec<f32>,
+}
 
 pub(crate) struct IDWTOutput {
     pub(crate) coefficients: Vec<f32>,
@@ -30,12 +37,13 @@ struct IDWTTempOutput {
 
 pub(crate) fn apply(
     storage: &DecompositionStorage,
-    tile_ctx: &mut TileDecodeContext,
+    scratch: &mut IdwtScratch,
+    output: &mut Vec<f32>,
     component_idx: usize,
     header: &Header,
     transform: WaveletTransform,
     cancel: Cancel<'_>,
-) -> Result<()> {
+) -> Result<IntRect> {
     let tile_decompositions = storage
         .tile_decompositions
         .get(component_idx)
@@ -54,11 +62,10 @@ pub(crate) fn apply(
         .get(tile_decompositions.first_ll_sub_band)
         .ok_or(DecodeError::Malformed)?;
 
-    let (scratch_buf, output, low_row, high_row) = (
-        &mut tile_ctx.idwt_scratch_buffer,
-        &mut tile_ctx.idwt_output,
-        &mut tile_ctx.idwt_low_row,
-        &mut tile_ctx.idwt_high_row,
+    let (scratch_buf, low_row, high_row) = (
+        &mut scratch.buffer,
+        &mut scratch.low_row,
+        &mut scratch.high_row,
     );
 
     let buffer_size = |decomposition: &Decomposition| {
@@ -66,23 +73,21 @@ pub(crate) fn apply(
     };
 
     let Some((first, rest)) = decompositions.split_first() else {
-        output.coefficients.clear();
+        output.clear();
         let ll_coeffs = storage
             .coefficients
             .get(ll_sub_band.coefficients.clone())
             .ok_or(DecodeError::Malformed)?;
-        output.coefficients.extend_from_slice(ll_coeffs);
+        output.extend_from_slice(ll_coeffs);
 
-        output.rect = ll_sub_band.rect;
-
-        return Ok(());
+        return Ok(ll_sub_band.rect);
     };
 
     let last = decompositions.last().ok_or(DecodeError::Malformed)?;
     let last_size = buffer_size(last);
-    if output.coefficients.capacity() < last_size {
-        output.coefficients.clear();
-        output.coefficients.reserve_exact(last_size);
+    if output.capacity() < last_size {
+        output.clear();
+        output.reserve_exact(last_size);
     }
 
     if let Some(prev) = decompositions
@@ -111,11 +116,7 @@ pub(crate) fn apply(
 
     let mut temp_output = filter_2d(
         IDWTInput::from_sub_band(ll_sub_band, storage)?,
-        if use_scratch {
-            scratch_buf
-        } else {
-            &mut output.coefficients
-        },
+        if use_scratch { scratch_buf } else { output },
         low_row,
         high_row,
         first,
@@ -129,7 +130,7 @@ pub(crate) fn apply(
 
         temp_output = if use_scratch {
             filter_2d(
-                IDWTInput::from_output(&output.coefficients),
+                IDWTInput::from_output(output),
                 scratch_buf,
                 low_row,
                 high_row,
@@ -141,7 +142,7 @@ pub(crate) fn apply(
         } else {
             filter_2d(
                 IDWTInput::from_output(scratch_buf),
-                &mut output.coefficients,
+                output,
                 low_row,
                 high_row,
                 decomposition,
@@ -152,9 +153,7 @@ pub(crate) fn apply(
         };
     }
 
-    output.rect = temp_output.rect;
-
-    Ok(())
+    Ok(temp_output.rect)
 }
 
 struct IDWTInput<'a> {

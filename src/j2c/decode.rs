@@ -4,7 +4,7 @@ use std::vec::Vec;
 use super::bitplane::{BitPlaneDecodeBuffers, BitPlaneDecodeContext};
 use super::build::{CodeBlock, Decomposition, Layer, Precinct, Segment, SubBand, SubBandType};
 use super::codestream::{ComponentInfo, Header, QuantizationStyle, WaveletTransform};
-use super::idwt::IDWTOutput;
+use super::idwt::{IDWTOutput, IdwtScratch};
 use super::progression::{ProgressionIterator, progression_iterator};
 use super::tag_tree::TagNode;
 use super::tile::{ComponentTile, ResolutionTile, Tile};
@@ -236,15 +236,39 @@ fn decode_tile(
                 .fill(0.0);
         }
         decode_component_tile_bit_planes(codestream, idx, tile, tile_ctx, storage, header, cancel)?;
-        idwt::apply(
-            storage,
-            tile_ctx,
-            idx,
-            header,
-            component_info.wavelet_transform(),
-            cancel,
-        )?;
-        store(tile, header, tile_ctx, channel, component_info, cancel)?;
+        let component_tile = ComponentTile::new(tile, component_info);
+        let resolution_tile = ResolutionTile::new(
+            component_tile,
+            component_info.num_resolution_levels() - 1 - header.skipped_resolution_levels,
+        );
+        let full_image_tile = resolution_tile.rect.x0 == 0
+            && resolution_tile.rect.y0 == 0
+            && resolution_tile.rect.width() == header.size_data.image_width()
+            && resolution_tile.rect.height() == header.size_data.image_height();
+
+        if full_image_tile {
+            idwt::apply(
+                storage,
+                &mut tile_ctx.idwt_scratch,
+                channel.container.as_vec_mut(),
+                idx,
+                header,
+                component_info.wavelet_transform(),
+                cancel,
+            )?;
+            channel.container.restore_padding();
+        } else {
+            tile_ctx.idwt_output.rect = idwt::apply(
+                storage,
+                &mut tile_ctx.idwt_scratch,
+                &mut tile_ctx.idwt_output.coefficients,
+                idx,
+                header,
+                component_info.wavelet_transform(),
+                cancel,
+            )?;
+            store(tile, header, tile_ctx, channel, component_info, cancel)?;
+        }
     }
 
     Ok(())
@@ -340,9 +364,7 @@ impl DecompositionStorage {
 #[derive(Default)]
 pub(crate) struct TileDecodeContext {
     pub(crate) idwt_output: IDWTOutput,
-    pub(crate) idwt_scratch_buffer: Vec<f32>,
-    pub(crate) idwt_low_row: Vec<f32>,
-    pub(crate) idwt_high_row: Vec<f32>,
+    pub(crate) idwt_scratch: IdwtScratch,
     pub(crate) bit_plane_decode_context: BitPlaneDecodeContext,
     pub(crate) bit_plane_decode_buffers: BitPlaneDecodeBuffers,
 }
