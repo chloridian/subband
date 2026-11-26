@@ -24,7 +24,7 @@ std = []
 simd = ["fearless_simd", "std"]
 
 [dev-dependencies]
-divan = "0.1"
+divan = { package = "codspeed-divan-compat", version = "6.0.0" }
 png = "0.18.1"
 
 [[test]]

@@ -69,3 +69,24 @@ jobs:
           targets: thumbv6m-none-eabi
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --no-default-features --target thumbv6m-none-eabi
+
+  benches:
+    name: Benches
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
+      - run: cargo codspeed build
+      - uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          run: cargo codspeed run
