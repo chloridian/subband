@@ -2,9 +2,8 @@
 
 Subband is a fork of [hayro-jpeg2000](https://github.com/LaurenzV/hayro), tuned for the
 textures Second Life serves: raw JPEG 2000 codestreams (`.j2c`) from untrusted sources,
-decoded at reduced resolution and cancelled when no longer needed. It still decodes the
-JP2 container format and most of the JPEG 2000 core coding system (ISO/IEC 15444-1), as
-well as some color spaces from the extensions (ISO/IEC 15444-2). An encoder is planned.
+decoded at reduced resolution and cancelled when no longer needed. It also unwraps the
+JP2 container format to decode its codestream. An encoder is planned.
 
 ## Example
 
@@ -23,9 +22,6 @@ let mut ctx = DecoderContext::default();
 let decoded = image.decode(&mut ctx).unwrap();
 let pixels = decoded.data_u8().unwrap();
 ```
-
-The [png example](https://github.com/hymenaei/subband/blob/main/examples/png.rs)
-converts a JPEG 2000 image to PNG through the `image` crate.
 
 ## Testing
 
