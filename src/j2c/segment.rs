@@ -29,11 +29,11 @@ impl From<BitReadError> for PacketError {
     }
 }
 
-pub(crate) fn parse<'a, 'b>(
-    tile: &'b Tile<'a>,
+pub(crate) fn parse(
+    tile: &Tile<'_>,
     mut progression_iterator: Box<dyn Iterator<Item = ProgressionData> + '_>,
     header: &Header,
-    storage: &mut DecompositionStorage<'a>,
+    storage: &mut DecompositionStorage,
     received_packets: &mut [u64],
     decoded_resolutions: usize,
     cancel: Cancel<'_>,
@@ -60,11 +60,11 @@ pub(crate) fn parse<'a, 'b>(
     Ok(())
 }
 
-fn parse_inner<'a>(
-    mut tile_part: TilePart<'a>,
+fn parse_inner(
+    mut tile_part: TilePart<'_>,
     progression_iterator: &mut dyn Iterator<Item = ProgressionData>,
     component_infos: &[ComponentInfo],
-    storage: &mut DecompositionStorage<'a>,
+    storage: &mut DecompositionStorage,
     received_packets: &mut [u64],
     decoded_resolutions: usize,
     num_layers: usize,
@@ -95,11 +95,11 @@ fn parse_inner<'a>(
     Ok(Ok(()))
 }
 
-fn parse_packet<'a>(
-    tile_part: &mut TilePart<'a>,
+fn parse_packet(
+    tile_part: &mut TilePart<'_>,
     progression_iterator: &mut dyn Iterator<Item = ProgressionData>,
     component_infos: &[ComponentInfo],
-    storage: &mut DecompositionStorage<'a>,
+    storage: &mut DecompositionStorage,
 ) -> result::Result<ProgressionData, PacketError> {
     let Some(progression_data) = progression_iterator.next() else {
         let header_reader = tile_part.header();
@@ -168,6 +168,7 @@ fn parse_packet<'a>(
         }
     }
 
+    let body_offset = tile_part.body_offset();
     let body_reader = tile_part.body();
 
     if !zero_length {
@@ -205,8 +206,14 @@ fn parse_packet<'a>(
 
                     let mut complete = true;
                     for segment in segments {
+                        let start = body_offset
+                            .checked_add(body_reader.offset())
+                            .ok_or(PacketError::Malformed)?;
                         if let Some(bytes) = body_reader.read_bytes(segment.data_length as usize) {
-                            segment.data = bytes;
+                            let end = start
+                                .checked_add(bytes.len())
+                                .ok_or(PacketError::Malformed)?;
+                            segment.data = start..end;
                         } else {
                             complete = false;
                             break;
@@ -232,7 +239,7 @@ fn parse_packet<'a>(
 fn rollback_packet_header(
     sub_band_iter: SubBandIter,
     progression_data: &ProgressionData,
-    storage: &mut DecompositionStorage<'_>,
+    storage: &mut DecompositionStorage,
 ) {
     let layer_num = progression_data.layer_num as usize;
     let precinct_idx = progression_data.precinct as usize;
@@ -254,7 +261,7 @@ fn rollback_packet_header(
     }
 }
 
-fn rollback_code_block(cb_idx: usize, layer_num: usize, storage: &mut DecompositionStorage<'_>) {
+fn rollback_code_block(cb_idx: usize, layer_num: usize, storage: &mut DecompositionStorage) {
     let Some(code_block) = storage.code_blocks.get_mut(cb_idx) else {
         return;
     };
@@ -300,7 +307,7 @@ fn resolve_segments(
     sub_band_dx: usize,
     progression_data: &ProgressionData,
     reader: &mut BitReader<'_>,
-    storage: &mut DecompositionStorage<'_>,
+    storage: &mut DecompositionStorage,
     component_info: &ComponentInfo,
 ) -> result::Result<(), PacketError> {
     const MAX_CODING_PASSES: u8 = 1 + 3 * (MAX_BITPLANE_COUNT - 1);
@@ -411,7 +418,7 @@ fn resolve_segments(
                 idx: segment,
                 data_length: length,
                 coding_pases: coding_passes_for_segment,
-                data: &[],
+                data: 0..0,
             });
 
             Ok(())

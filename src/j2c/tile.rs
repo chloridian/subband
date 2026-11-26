@@ -27,6 +27,7 @@ pub(crate) struct Tile<'a> {
 #[derive(Clone, Debug)]
 pub(crate) struct MergedTilePart<'a> {
     pub(crate) data: BitReader<'a>,
+    pub(crate) body_offset: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -34,6 +35,7 @@ pub(crate) struct SeparatedTilePart<'a> {
     pub(crate) headers: Vec<BitReader<'a>>,
     pub(crate) active_header_reader: usize,
     pub(crate) body: BitReader<'a>,
+    pub(crate) body_offset: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -67,6 +69,13 @@ impl<'a> TilePart<'a> {
         match self {
             TilePart::Merged(m) => &mut m.data,
             TilePart::Separated(s) => &mut s.body,
+        }
+    }
+
+    pub(crate) fn body_offset(&self) -> usize {
+        match self {
+            TilePart::Merged(m) => m.body_offset,
+            TilePart::Separated(s) => s.body_offset,
         }
     }
 }
@@ -377,6 +386,7 @@ fn parse_tile_part<'a>(
         return Ok(true);
     }
 
+    let body_offset = reader.offset();
     let data = if let Some(len) = declared_len {
         let Some(remaining_bytes) = len.checked_sub(reader.offset() - start) else {
             return if main_header.strict {
@@ -405,10 +415,12 @@ fn parse_tile_part<'a>(
             headers,
             active_header_reader: 0,
             body: BitReader::new(data),
+            body_offset,
         })
     } else {
         TilePart::Merged(MergedTilePart {
             data: BitReader::new(data),
+            body_offset,
         })
     };
 

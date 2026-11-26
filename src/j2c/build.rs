@@ -10,7 +10,7 @@ use std::vec;
 
 pub(crate) fn build(
     tile: &Tile<'_>,
-    storage: &mut DecompositionStorage<'_>,
+    storage: &mut DecompositionStorage,
     skipped_resolution_levels: u8,
     cancel: Cancel<'_>,
 ) -> Result<()> {
@@ -19,7 +19,7 @@ pub(crate) fn build(
 
 fn build_decompositions(
     tile: &Tile<'_>,
-    storage: &mut DecompositionStorage<'_>,
+    storage: &mut DecompositionStorage,
     skipped_resolution_levels: u8,
     cancel: Cancel<'_>,
 ) -> Result<()> {
@@ -53,7 +53,7 @@ fn build_decompositions(
 
         let mut build_sub_band = |sub_band_type: SubBandType,
                                   resolution_tile: &ResolutionTile<'_>,
-                                  storage: &mut DecompositionStorage<'_>|
+                                  storage: &mut DecompositionStorage|
          -> Result<usize> {
             let sub_band_rect = resolution_tile.sub_band_rect(sub_band_type);
 
@@ -115,7 +115,7 @@ fn build_precincts(
     resolution_tile: &ResolutionTile<'_>,
     sub_band_rect: IntRect,
     tile: &Tile<'_>,
-    storage: &mut DecompositionStorage<'_>,
+    storage: &mut DecompositionStorage,
     cancel: Cancel<'_>,
 ) -> Result<Range<usize>> {
     let start = storage.precincts.len();
@@ -182,7 +182,7 @@ fn build_code_blocks(
     code_blocks_x: u32,
     code_blocks_y: u32,
     tile: &Tile<'_>,
-    storage: &mut DecompositionStorage<'_>,
+    storage: &mut DecompositionStorage,
     cancel: Cancel<'_>,
 ) -> Result<Range<usize>> {
     let mut y = code_block_area.y0;
@@ -279,11 +279,11 @@ pub(crate) struct CodeBlock {
     pub(crate) non_empty_layer_count: u8,
 }
 
-pub(crate) struct Segment<'a> {
+pub(crate) struct Segment {
     pub(crate) idx: u8,
     pub(crate) coding_pases: u8,
     pub(crate) data_length: u32,
-    pub(crate) data: &'a [u8],
+    pub(crate) data: Range<usize>,
 }
 
 #[derive(Clone)]

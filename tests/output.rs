@@ -122,3 +122,61 @@ fn write_to_component_counts() {
         assert_eq!(buf, expected, "{name}: output mismatch");
     }
 }
+
+#[test]
+fn shared_context_matches_fresh() {
+    for discard in [0, 2] {
+        let settings = DecodeSettings {
+            discard,
+            ..DecodeSettings::default()
+        };
+        let mut cases: Vec<(&str, Vec<u8>, Vec<u8>)> = FIXTURES
+            .iter()
+            .map(|&name| {
+                let data = fixture(name);
+                let image = Image::from_codestream(&data, &settings)
+                    .unwrap_or_else(|e| panic!("{name} discard {discard}: parse failed: {e}"));
+                let mut ctx = DecoderContext::default();
+                let decoded = image
+                    .decode(&mut ctx)
+                    .unwrap_or_else(|e| panic!("{name} discard {discard}: decode failed: {e}"));
+                let expected = decoded
+                    .data_u8()
+                    .unwrap_or_else(|e| panic!("{name} discard {discard}: data_u8 failed: {e}"));
+                (name, data, expected)
+            })
+            .collect();
+
+        cases.sort_by_key(|(_, _, expected)| expected.len());
+        let max_len = cases.last().map_or(0, |(_, _, expected)| expected.len());
+
+        for reverse in [false, true] {
+            let mut ctx = DecoderContext::default();
+            let mut buf = vec![0; max_len];
+            let order: Box<dyn Iterator<Item = &(&str, Vec<u8>, Vec<u8>)>> = if reverse {
+                Box::new(cases.iter().rev())
+            } else {
+                Box::new(cases.iter())
+            };
+
+            for (name, data, expected) in order {
+                let image = Image::from_codestream(data, &settings)
+                    .unwrap_or_else(|e| panic!("{name} discard {discard}: parse failed: {e}"));
+                let decoded = image
+                    .decode(&mut ctx)
+                    .unwrap_or_else(|e| panic!("{name} discard {discard}: decode failed: {e}"));
+                let out = buf
+                    .get_mut(..decoded.buffer_len())
+                    .expect("shared buffer fits fixture");
+                decoded
+                    .write_to(out)
+                    .unwrap_or_else(|e| panic!("{name} discard {discard}: write_to failed: {e}"));
+                assert_eq!(
+                    out,
+                    expected.as_slice(),
+                    "{name} discard {discard} reverse={reverse}: shared context output mismatch"
+                );
+            }
+        }
+    }
+}

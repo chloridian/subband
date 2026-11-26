@@ -478,10 +478,12 @@ fn parse_tile_part<'a>(
             headers,
             active_header_reader: 0,
             body: BitReader::new(body_bytes),
+            body_offset: sod_end,
         })
     } else {
         TilePart::Merged(MergedTilePart {
             data: BitReader::new(body_bytes),
+            body_offset: sod_end,
         })
     };
 

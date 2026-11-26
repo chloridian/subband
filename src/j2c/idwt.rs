@@ -29,7 +29,7 @@ struct IDWTTempOutput {
 }
 
 pub(crate) fn apply(
-    storage: &DecompositionStorage<'_>,
+    storage: &DecompositionStorage,
     tile_ctx: &mut TileDecodeContext,
     component_idx: usize,
     header: &Header,
@@ -148,7 +148,7 @@ struct IDWTInput<'a> {
 }
 
 impl<'a> IDWTInput<'a> {
-    fn from_sub_band(sub_band: &'a SubBand, storage: &'a DecompositionStorage<'_>) -> Result<Self> {
+    fn from_sub_band(sub_band: &'a SubBand, storage: &'a DecompositionStorage) -> Result<Self> {
         Ok(IDWTInput {
             coefficients: storage
                 .coefficients
@@ -167,7 +167,7 @@ fn filter_2d(
     coefficients: &mut Vec<f32>,
     decomposition: &Decomposition,
     transform: WaveletTransform,
-    storage: &DecompositionStorage<'_>,
+    storage: &DecompositionStorage,
     cancel: Cancel<'_>,
 ) -> Result<IDWTTempOutput> {
     dispatch!(Level::new(), simd => {
@@ -186,7 +186,7 @@ fn filter_2d_inner<S: Simd>(
     coefficients: &mut Vec<f32>,
     decomposition: &Decomposition,
     transform: WaveletTransform,
-    storage: &DecompositionStorage<'_>,
+    storage: &DecompositionStorage,
     cancel: Cancel<'_>,
 ) -> Result<()> {
     let width = decomposition.rect.width() as usize;
@@ -219,7 +219,7 @@ fn interleave_and_filter_horizontal<S: Simd>(
     coefficients: &mut [f32],
     decomposition: &Decomposition,
     transform: WaveletTransform,
-    storage: &DecompositionStorage<'_>,
+    storage: &DecompositionStorage,
     cancel: Cancel<'_>,
 ) -> Result<()> {
     let IntRect {

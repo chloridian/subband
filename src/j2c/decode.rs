@@ -16,10 +16,10 @@ use crate::math::{self, SimdBuffer};
 use crate::reader::BitReader;
 use core::ops::Range;
 
-pub(crate) fn decode<'a>(
-    data: &'a [u8],
-    header: &'a Header,
-    ctx: &mut DecoderContext<'a>,
+pub(crate) fn decode(
+    data: &[u8],
+    header: &Header,
+    ctx: &mut DecoderContext,
     cancel: Cancel<'_>,
 ) -> Result<()> {
     let mut reader = BitReader::new(data);
@@ -51,6 +51,7 @@ pub(crate) fn decode<'a>(
         let progression_iterator = progression_iterator(tile, header)?;
 
         decode_tile(
+            data,
             tile,
             header,
             progression_iterator,
@@ -127,16 +128,16 @@ fn update_layers_received(
 }
 
 #[derive(Default)]
-pub struct DecoderContext<'a> {
+pub struct DecoderContext {
     tile_decode_context: TileDecodeContext,
     pub(crate) channel_data: Vec<ComponentData>,
     pub(crate) layers_received: Vec<u8>,
     received_packets: Vec<u64>,
     expected_packets: Vec<u64>,
-    storage: DecompositionStorage<'a>,
+    storage: DecompositionStorage,
 }
 
-impl DecoderContext<'_> {
+impl DecoderContext {
     fn reset(
         &mut self,
         header: &Header,
@@ -162,13 +163,14 @@ impl DecoderContext<'_> {
     }
 }
 
-fn decode_tile<'a, 'b>(
-    tile: &'b Tile<'a>,
+fn decode_tile(
+    codestream: &[u8],
+    tile: &Tile<'_>,
     header: &Header,
     progression_iterator: Box<dyn Iterator<Item = ProgressionData> + '_>,
     tile_ctx: &mut TileDecodeContext,
     channel_data: &mut [ComponentData],
-    storage: &mut DecompositionStorage<'a>,
+    storage: &mut DecompositionStorage,
     received_packets: &mut [u64],
     decoded_resolutions: usize,
     cancel: Cancel<'_>,
@@ -206,7 +208,7 @@ fn decode_tile<'a, 'b>(
                 .ok_or(DecodeError::Malformed)?
                 .fill(0.0);
         }
-        decode_component_tile_bit_planes(idx, tile, tile_ctx, storage, header, cancel)?;
+        decode_component_tile_bit_planes(codestream, idx, tile, tile_ctx, storage, header, cancel)?;
         idwt::apply(
             storage,
             tile_ctx,
@@ -283,8 +285,8 @@ impl Iterator for SubBandIter {
 }
 
 #[derive(Default)]
-pub(crate) struct DecompositionStorage<'a> {
-    pub(crate) segments: Vec<Segment<'a>>,
+pub(crate) struct DecompositionStorage {
+    pub(crate) segments: Vec<Segment>,
     pub(crate) layers: Vec<Layer>,
     pub(crate) code_blocks: Vec<CodeBlock>,
     pub(crate) precincts: Vec<Precinct>,
@@ -295,7 +297,7 @@ pub(crate) struct DecompositionStorage<'a> {
     pub(crate) tile_decompositions: Vec<TileDecompositions>,
 }
 
-impl DecompositionStorage<'_> {
+impl DecompositionStorage {
     fn reset(&mut self) {
         self.segments.clear();
         self.layers.clear();
@@ -320,11 +322,12 @@ impl TileDecodeContext {
     fn reset(&mut self) {}
 }
 
-fn decode_component_tile_bit_planes<'a>(
+fn decode_component_tile_bit_planes(
+    codestream: &[u8],
     component_idx: usize,
-    tile: &Tile<'a>,
+    tile: &Tile<'_>,
     tile_ctx: &mut TileDecodeContext,
-    storage: &mut DecompositionStorage<'a>,
+    storage: &mut DecompositionStorage,
     header: &Header,
     cancel: Cancel<'_>,
 ) -> Result<()> {
@@ -342,6 +345,7 @@ fn decode_component_tile_bit_planes<'a>(
 
         for sub_band_idx in sub_band_iter {
             decode_sub_band_bitplanes(
+                codestream,
                 sub_band_idx,
                 resolution,
                 component_info,
@@ -357,11 +361,12 @@ fn decode_component_tile_bit_planes<'a>(
 }
 
 fn decode_sub_band_bitplanes(
+    codestream: &[u8],
     sub_band_idx: usize,
     resolution: u8,
     component_info: &ComponentInfo,
     tile_ctx: &mut TileDecodeContext,
-    storage: &mut DecompositionStorage<'_>,
+    storage: &mut DecompositionStorage,
     header: &Header,
     cancel: Cancel<'_>,
 ) -> Result<()> {
@@ -425,6 +430,7 @@ fn decode_sub_band_bitplanes(
             cancel.check()?;
 
             bitplane::decode(
+                codestream,
                 code_block,
                 sub_band.sub_band_type,
                 num_bitplanes,

@@ -99,17 +99,14 @@ impl<'a> Image<'a> {
         self.header.global_coding_style.num_layers
     }
 
-    pub fn decode<'b>(
-        &'a self,
-        decoder_context: &'b mut DecoderContext<'a>,
-    ) -> Result<DecodedImage<'b>> {
+    pub fn decode<'b>(&self, decoder_context: &'b mut DecoderContext) -> Result<DecodedImage<'b>> {
         let settings = &self.settings;
         let cancel = Cancel(settings.cancel.as_ref());
         j2c::decode(self.codestream, &self.header, decoder_context, cancel)?;
         Ok(DecodedImage {
             decoded_components: &mut decoder_context.channel_data,
             layers_received: &decoder_context.layers_received,
-            cancel,
+            cancel: settings.cancel.clone(),
         })
     }
 }
@@ -160,7 +157,7 @@ pub fn inspect(data: &[u8], settings: &DecodeSettings) -> Result<Inspection> {
 }
 
 fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) -> Result<()> {
-    let cancel = image.cancel;
+    let cancel = Cancel(image.cancel.as_ref());
     let components = &*image.decoded_components;
     let Some(first) = components.first() else {
         return Ok(());

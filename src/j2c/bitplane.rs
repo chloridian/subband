@@ -9,12 +9,13 @@ use crate::error::{DecodeError, Result, bail};
 use crate::reader::BitReader;
 
 pub(crate) fn decode(
+    codestream: &[u8],
     code_block: &CodeBlock,
     sub_band_type: SubBandType,
     total_bitplanes: u8,
     style: &CodeBlockStyle,
     tile_ctx: &mut TileDecodeContext,
-    storage: &DecompositionStorage<'_>,
+    storage: &DecompositionStorage,
     max_layers: Option<u8>,
     strict: bool,
 ) -> Result<()> {
@@ -28,6 +29,7 @@ pub(crate) fn decode(
     tile_ctx.bit_plane_decode_buffers.reset();
 
     decode_inner(
+        codestream,
         code_block,
         storage,
         &mut tile_ctx.bit_plane_decode_context,
@@ -40,8 +42,9 @@ pub(crate) fn decode(
 }
 
 fn decode_inner(
+    codestream: &[u8],
     code_block: &CodeBlock,
-    storage: &DecompositionStorage<'_>,
+    storage: &DecompositionStorage,
     ctx: &mut BitPlaneDecodeContext,
     bp_buffers: &mut BitPlaneDecodeBuffers,
     max_layers: Option<u8>,
@@ -71,7 +74,8 @@ fn decode_inner(
                     last_segment_idx += 1;
                 }
 
-                bp_buffers.combined_layers.extend(segment.data);
+                let bytes = codestream.get(segment.data.clone())?;
+                bp_buffers.combined_layers.extend_from_slice(bytes);
                 coding_passes += segment.coding_pases;
             }
         }
