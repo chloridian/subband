@@ -588,15 +588,6 @@ pub(crate) struct SimdBuffer<const N: usize> {
 }
 
 impl<const N: usize> SimdBuffer<N> {
-    pub(crate) fn new(mut data: Vec<f32>) -> Self {
-        let original_len = data.len();
-        let padded_len = Self::padded_len(original_len);
-        if padded_len > original_len {
-            data.resize(padded_len, 0.0);
-        }
-        Self { data, original_len }
-    }
-
     pub(crate) fn zeros(original_len: usize) -> Self {
         let padded_len = Self::padded_len(original_len);
         let data = vec![0.0; padded_len];

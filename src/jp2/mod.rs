@@ -5,24 +5,18 @@ use crate::error::{FormatError, Result, bail};
 use crate::j2c::ComponentData;
 use crate::jp2::r#box::{FILE_TYPE, JP2_SIGNATURE};
 use crate::jp2::cdef::ChannelDefinitionBox;
-use crate::jp2::cmap::{ComponentMappingBox, ComponentMappingEntry, ComponentMappingType};
 use crate::jp2::colr::ColorSpecificationBox;
-use crate::jp2::pclr::PaletteBox;
 use crate::reader::BitReader;
 use crate::{DecodeSettings, Image, resolve_alpha_and_color_space};
 
 pub(crate) mod r#box;
 pub(crate) mod cdef;
-pub(crate) mod cmap;
 pub(crate) mod colr;
-pub(crate) mod pclr;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ImageBoxes {
     pub(crate) color_specification: Option<ColorSpecificationBox>,
     pub(crate) channel_definition: Option<ChannelDefinitionBox>,
-    pub(crate) palette: Option<PaletteBox>,
-    pub(crate) component_mapping: Option<ComponentMappingBox>,
 }
 
 /// A decoded JPEG2000 image.
@@ -32,7 +26,7 @@ pub struct DecodedImage<'a> {
     pub(crate) cancel: Cancel<'a>,
 }
 
-pub(crate) fn parse<'a>(data: &'a [u8], mut settings: DecodeSettings) -> Result<Image<'a>> {
+pub(crate) fn parse<'a>(data: &'a [u8], settings: DecodeSettings) -> Result<Image<'a>> {
     let mut reader = BitReader::new(data);
     let signature_box = r#box::read(&mut reader, settings.strict).ok_or(FormatError::InvalidBox)?;
 
@@ -77,17 +71,6 @@ pub(crate) fn parse<'a>(data: &'a [u8], mut settings: DecodeSettings) -> Result<
                         r#box::COLOUR_SPECIFICATION => {
                             colr::parse(&mut boxes, child_box.data)?;
                         }
-                        r#box::PALETTE => {
-                            if pclr::parse(&mut boxes, child_box.data).is_err() && settings.strict {
-                                bail!(FormatError::InvalidBox);
-                            }
-
-                            // Reduced-resolution decoding would corrupt palette indices.
-                            settings.target_resolution = None;
-                        }
-                        r#box::COMPONENT_MAPPING => {
-                            cmap::parse(&mut boxes, child_box.data)?;
-                        }
                         _ => {}
                     }
                 }
@@ -101,22 +84,8 @@ pub(crate) fn parse<'a>(data: &'a [u8], mut settings: DecodeSettings) -> Result<
         }
     }
 
-    let mut image_boxes = image_boxes.ok_or(FormatError::InvalidBox)?;
+    let image_boxes = image_boxes.ok_or(FormatError::InvalidBox)?;
     let parsed_codestream = parsed_codestream.ok_or(FormatError::MissingCodestream)?;
-
-    if let Some(palette) = image_boxes.palette.as_ref()
-        && image_boxes.component_mapping.is_none()
-    {
-        // Some files have a pclr box without cmap; map every channel through the palette.
-        let mappings = (0..palette.columns.len())
-            .map(|i| ComponentMappingEntry {
-                component_index: 0,
-                mapping_type: ComponentMappingType::Palette { column: i as u8 },
-            })
-            .collect::<Vec<_>>();
-
-        image_boxes.component_mapping = Some(ComponentMappingBox { entries: mappings });
-    }
 
     let (color_space, has_alpha) =
         resolve_alpha_and_color_space(&image_boxes, &parsed_codestream.header, &settings)?;

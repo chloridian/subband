@@ -119,8 +119,6 @@ pub enum DecodingError {
 pub enum ColorError {
     /// Multi-component transform failed.
     Mct,
-    /// Failed to resolve palette indices.
-    PaletteResolutionFailed,
     /// Failed to convert from sYCC to RGB.
     SyccConversionFailed,
     /// Failed to convert from LAB to RGB.
@@ -231,7 +229,6 @@ impl fmt::Display for ColorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Mct => write!(f, "multi-component transform failed"),
-            Self::PaletteResolutionFailed => write!(f, "failed to resolve palette indices"),
             Self::SyccConversionFailed => write!(f, "failed to convert from sYCC to RGB"),
             Self::LabConversionFailed => write!(f, "failed to convert from LAB to RGB"),
         }

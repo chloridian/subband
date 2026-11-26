@@ -109,18 +109,6 @@ fn reduced_target_larger_than_image() {
 }
 
 #[test]
-fn reduced_palette() {
-    check_with(
-        "palette_small",
-        DecodeSettings {
-            target_resolution: Some((1, 1)),
-            ..Default::default()
-        },
-        reference("palette_small"),
-    );
-}
-
-#[test]
 fn reduced_per_component_levels() {
     check_with(
         "codestream_levels_per_component",

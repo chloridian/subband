@@ -7,7 +7,6 @@ mod errors;
 mod jp2;
 mod mct;
 mod packets;
-mod palette;
 mod quantization;
 mod roi;
 mod tile_parts;

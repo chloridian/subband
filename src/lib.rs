@@ -50,7 +50,6 @@ use crate::error::{bail, err};
 use crate::j2c::Header;
 use crate::jp2::ImageBoxes;
 use crate::jp2::cdef::{ChannelAssociation, ChannelType};
-use crate::jp2::cmap::ComponentMappingType;
 use crate::jp2::colr::{CieLab, EnumeratedColorspace};
 
 mod cancel;
@@ -77,27 +76,14 @@ pub(crate) const JP2_MAGIC: &[u8] = b"\x00\x00\x00\x0C\x6A\x50\x20\x20";
 pub(crate) const CODESTREAM_MAGIC: &[u8] = b"\xFF\x4F\xFF\x51";
 
 /// Settings to apply during decoding.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DecodeSettings {
-    /// Whether to resolve palette indices to colors instead of returning them as grayscale.
-    pub resolve_palette_indices: bool,
     /// Whether to reject malformed input instead of decoding it leniently.
     pub strict: bool,
     /// A hint for the target resolution that the image should be decoded at.
     pub target_resolution: Option<(u32, u32)>,
     /// A check for cancelling decoding.
     pub cancel: Option<CancelHandle>,
-}
-
-impl Default for DecodeSettings {
-    fn default() -> Self {
-        Self {
-            resolve_palette_indices: true,
-            strict: false,
-            target_resolution: None,
-            cancel: None,
-        }
-    }
 }
 
 /// A JPEG2000 image or codestream.
@@ -175,12 +161,6 @@ impl<'a> Image<'a> {
             cancel,
         };
 
-        if settings.resolve_palette_indices {
-            let components = core::mem::take(decoded_image.decoded_components);
-            *decoded_image.decoded_components =
-                resolve_palette_indices(components, &decoded_image.boxes, cancel)?;
-        }
-
         if let Some(cdef) = &decoded_image.boxes.channel_definition {
             // Assumes each component is referenced only once.
             // TODO: Move the components instead of cloning them.
@@ -214,14 +194,7 @@ pub(crate) fn resolve_alpha_and_color_space(
     header: &Header,
     settings: &DecodeSettings,
 ) -> Result<(ColorSpace, bool)> {
-    let mut num_components = header.component_infos.len();
-
-    if settings.resolve_palette_indices
-        && let Some(palette_box) = &boxes.palette
-    {
-        num_components = palette_box.columns.len();
-    }
-
+    let actual_num_components = header.component_infos.len();
     let mut has_alpha = false;
 
     if let Some(cdef) = &boxes.channel_definition {
@@ -229,18 +202,10 @@ pub(crate) fn resolve_alpha_and_color_space(
         has_alpha = last.channel_type == ChannelType::Opacity;
     }
 
-    let mut color_space = get_color_space(boxes, num_components)?;
+    let mut color_space = get_color_space(boxes, actual_num_components)?;
 
-    if !settings.resolve_palette_indices && boxes.palette.is_some() {
-        has_alpha = false;
-        color_space = ColorSpace::Gray;
-    }
-
-    let actual_num_components = header.component_infos.len();
-
-    if boxes.palette.is_none()
-        && actual_num_components
-            != (color_space.num_channels() + if has_alpha { 1 } else { 0 }) as usize
+    if actual_num_components
+        != (color_space.num_channels() + if has_alpha { 1 } else { 0 }) as usize
     {
         if !settings.strict
             && actual_num_components == color_space.num_channels() as usize + 1
@@ -533,63 +498,6 @@ fn get_color_space(boxes: &ImageBoxes, num_components: usize) -> Result<ColorSpa
     };
 
     Ok(cs)
-}
-
-fn resolve_palette_indices(
-    components: Vec<ComponentData>,
-    boxes: &ImageBoxes,
-    cancel: Cancel<'_>,
-) -> Result<Vec<ComponentData>> {
-    let Some(palette) = boxes.palette.as_ref() else {
-        return Ok(components);
-    };
-
-    let mapping = boxes.component_mapping.as_ref().unwrap();
-    let max_index = palette.entries.len() as i64 - 1;
-    let mut resolved = Vec::with_capacity(mapping.entries.len());
-
-    for entry in &mapping.entries {
-        cancel.check()?;
-
-        let component_idx = entry.component_index as usize;
-        let component = components
-            .get(component_idx)
-            .ok_or(ColorError::PaletteResolutionFailed)?;
-
-        match entry.mapping_type {
-            ComponentMappingType::Direct => resolved.push(component.clone()),
-            ComponentMappingType::Palette { column } => {
-                let column_idx = column as usize;
-                let column_info = palette
-                    .columns
-                    .get(column_idx)
-                    .ok_or(ColorError::PaletteResolutionFailed)?;
-
-                let mut mapped =
-                    Vec::with_capacity(component.container.truncated().len() + SIMD_WIDTH);
-
-                for (i, &sample) in component.container.truncated().iter().enumerate() {
-                    if i % CHUNK == 0 {
-                        cancel.check()?;
-                    }
-
-                    // Lossy decoding can reconstruct indices outside the palette.
-                    let index = ((sample + 0.5) as i64).clamp(0, max_index);
-                    let value = palette
-                        .map(index as usize, column_idx)
-                        .ok_or(ColorError::PaletteResolutionFailed)?;
-                    mapped.push(value as f32);
-                }
-
-                resolved.push(ComponentData {
-                    container: math::SimdBuffer::new(mapped),
-                    bit_depth: column_info.bit_depth,
-                });
-            }
-        }
-    }
-
-    Ok(resolved)
 }
 
 #[inline(always)]

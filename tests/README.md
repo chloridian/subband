@@ -234,19 +234,6 @@ The tests replace a suite of files from SerenityOS, OpenJPEG and hayro itself. E
 | `colr_first_wins` | OpenJPEG (`file5.jp2`), OpenJPEG (`file7.jp2`), SerenityOS (`buggie-gray.jpf`), OpenJPEG (`issue208.jp2`) |
 | `colr_ycck` | Custom |
 
-### `palette`
-
-| Test | Provenance |
-|---|---|
-| `basic` | SerenityOS (`openjpeg-lossless-indexed-u8-rgb-u8.jp2`), OpenJPEG (`file9.jp2`) |
-| `tiled` | OpenJPEG (`issue104_jpxstream.jp2`), OpenJPEG (`issue254.jp2`) |
-| `small` | SerenityOS (`indexed-small.jp2`) |
-| `four_bit_entries` | OpenJPEG (`mem-b2b86b74-2753.jp2`) |
-| `out_of_range_indices` | Custom |
-| `cdef` | OpenJPEG (`issue412.jp2`) |
-| `cmap_outside_jp2h` | OpenJPEG (`issue235.jp2`) |
-| `unresolved` | OpenJPEG (`file9.jp2`) |
-
 ### `wavelet`
 
 | Test | Provenance |
@@ -260,7 +247,6 @@ The tests replace a suite of files from SerenityOS, OpenJPEG and hayro itself. E
 | `reduced_offset` | OpenJPEG (`b1_mono_res2`), OpenJPEG (`b3_mono_res1`) |
 | `reduced_precinct_limited` | OpenJPEG (`p1_07_res1`) |
 | `reduced_target_larger_than_image` | SerenityOS (`large_target_resolution`), OpenJPEG (`Bretagne2_res1`) |
-| `reduced_palette` | SerenityOS (`indexed-small_res1`) |
 | `reduced_per_component_levels` | OpenJPEG (`p0_08_res1`) |
 
 ### `quantization`
