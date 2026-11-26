@@ -14,7 +14,7 @@ mod tile;
 use crate::error::{FormatError, MarkerError, Result, bail};
 use crate::j2c::codestream::markers;
 use crate::reader::BitReader;
-use crate::{DecodeSettings, Image, resolve_alpha_and_color_space};
+use crate::{DecodeSettings, Image};
 
 use crate::math::{SIMD_WIDTH, SimdBuffer};
 pub(crate) use codestream::Header;
@@ -33,46 +33,19 @@ pub struct ComponentData {
 }
 
 impl ComponentData {
-    /// The bit depth of this component.
-    pub fn bit_depth(&self) -> u8 {
-        8
-    }
-
     /// The decoded samples of this component.
     pub fn samples(&self) -> &[f32] {
         self.container.truncated()
     }
 }
 
-pub(crate) fn parse<'a>(
-    stream: &'a [u8],
-    settings: &DecodeSettings,
-    color_channels: Option<u8>,
-) -> Result<Image<'a>> {
+pub(crate) fn parse<'a>(stream: &'a [u8], settings: &DecodeSettings) -> Result<Image<'a>> {
     let parsed_codestream = parse_raw(stream, settings)?;
-    let header = &parsed_codestream.header;
-
-    let (color_space, has_alpha) = if let Some(channels) = color_channels {
-        let color_space = match channels {
-            1 => crate::ColorSpace::Gray,
-            3 => crate::ColorSpace::RGB,
-            _ => bail!(FormatError::Unsupported),
-        };
-
-        (
-            color_space,
-            header.component_infos.len() == usize::from(channels) + 1,
-        )
-    } else {
-        resolve_alpha_and_color_space(&parsed_codestream.header)?
-    };
 
     Ok(Image {
         codestream: parsed_codestream.data,
         header: parsed_codestream.header,
         settings: settings.clone(),
-        color_space,
-        has_alpha,
     })
 }
 

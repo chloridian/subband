@@ -158,7 +158,6 @@ fn parse_tile_part<'a>(
     let start = reader.offset();
 
     let tile = &mut tiles[tile_part_header.tile_index as usize];
-    let num_components = tile.component_infos.len();
 
     let mut ppt_headers = vec![];
 
@@ -201,8 +200,8 @@ fn parse_tile_part<'a>(
             markers::COC => {
                 reader.read_marker()?;
 
-                let (component_index, coc) = codestream::coc_marker(reader, num_components as u16)
-                    .ok_or(MarkerError::ParseFailure("COC"))?;
+                let (component_index, coc) =
+                    codestream::coc_marker(reader).ok_or(MarkerError::ParseFailure("COC"))?;
 
                 let old = tile
                     .component_infos
@@ -222,8 +221,8 @@ fn parse_tile_part<'a>(
             }
             markers::QCC => {
                 reader.read_marker()?;
-                let (component_index, qcc) = codestream::qcc_marker(reader, num_components as u16)
-                    .ok_or(MarkerError::ParseFailure("QCC"))?;
+                let (component_index, qcc) =
+                    codestream::qcc_marker(reader).ok_or(MarkerError::ParseFailure("QCC"))?;
 
                 tile.component_infos
                     .get_mut(component_index as usize)
@@ -242,8 +241,7 @@ fn parse_tile_part<'a>(
             markers::RGN => {
                 reader.read_marker()?;
                 let (component_index, roi_shift) =
-                    codestream::rgn_marker(reader, num_components as u16)
-                        .ok_or(MarkerError::ParseFailure("RGN"))?;
+                    codestream::rgn_marker(reader).ok_or(MarkerError::ParseFailure("RGN"))?;
 
                 tile.component_infos
                     .get_mut(component_index as usize)
@@ -253,8 +251,7 @@ fn parse_tile_part<'a>(
             markers::POC => {
                 reader.read_marker()?;
                 tile.progression_changes.extend(
-                    codestream::poc_marker(reader, num_components as u16)
-                        .ok_or(MarkerError::ParseFailure("POC"))?,
+                    codestream::poc_marker(reader).ok_or(MarkerError::ParseFailure("POC"))?,
                 );
             }
             markers::PLT => {

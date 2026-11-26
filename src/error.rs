@@ -15,8 +15,8 @@ pub enum DecodeError {
     Validation(ValidationError),
     /// Errors related to decoding operations.
     Decoding(DecodingError),
-    /// Errors related to color space and component handling.
-    Color(ColorError),
+    /// Multi-component transform failed.
+    Mct,
     /// Decoding was cancelled.
     Cancelled,
 }
@@ -36,8 +36,6 @@ pub enum FormatError {
     InvalidBox,
     /// Missing codestream data.
     MissingCodestream,
-    /// Unsupported JP2 image format.
-    Unsupported,
 }
 
 /// Errors related to codestream markers.
@@ -89,7 +87,7 @@ pub enum ValidationError {
     MissingStepSize,
     /// Invalid quantization exponents.
     InvalidExponents,
-    /// Valid codestream feature outside the texture profile.
+    /// Valid codestream outside what Subband decodes (1-4 unsigned 8-bit components, no subsampling, zero offsets).
     Unsupported,
 }
 
@@ -112,13 +110,6 @@ pub enum DecodingError {
     UnexpectedEof,
 }
 
-/// Errors related to color space and component handling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorError {
-    /// Multi-component transform failed.
-    Mct,
-}
-
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -127,7 +118,7 @@ impl fmt::Display for DecodeError {
             Self::Tile(e) => write!(f, "{e}"),
             Self::Validation(e) => write!(f, "{e}"),
             Self::Decoding(e) => write!(f, "{e}"),
-            Self::Color(e) => write!(f, "{e}"),
+            Self::Mct => write!(f, "multi-component transform failed"),
             Self::Cancelled => write!(f, "{Cancelled}"),
         }
     }
@@ -146,7 +137,6 @@ impl fmt::Display for FormatError {
             Self::InvalidFileType => write!(f, "invalid JP2 file type"),
             Self::InvalidBox => write!(f, "invalid JP2 box"),
             Self::MissingCodestream => write!(f, "missing codestream data"),
-            Self::Unsupported => write!(f, "unsupported JP2 image"),
         }
     }
 }
@@ -195,7 +185,7 @@ impl fmt::Display for ValidationError {
             }
             Self::MissingStepSize => write!(f, "missing exponent step size"),
             Self::InvalidExponents => write!(f, "invalid quantization exponents"),
-            Self::Unsupported => write!(f, "unsupported texture profile feature"),
+            Self::Unsupported => write!(f, "unsupported codestream"),
         }
     }
 }
@@ -218,14 +208,6 @@ impl fmt::Display for DecodingError {
     }
 }
 
-impl fmt::Display for ColorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Mct => write!(f, "multi-component transform failed"),
-        }
-    }
-}
-
 impl core::error::Error for DecodeError {}
 impl core::error::Error for Cancelled {}
 impl core::error::Error for FormatError {}
@@ -233,7 +215,6 @@ impl core::error::Error for MarkerError {}
 impl core::error::Error for TileError {}
 impl core::error::Error for ValidationError {}
 impl core::error::Error for DecodingError {}
-impl core::error::Error for ColorError {}
 
 impl From<Cancelled> for DecodeError {
     fn from(_: Cancelled) -> Self {
@@ -268,12 +249,6 @@ impl From<ValidationError> for DecodeError {
 impl From<DecodingError> for DecodeError {
     fn from(e: DecodingError) -> Self {
         Self::Decoding(e)
-    }
-}
-
-impl From<ColorError> for DecodeError {
-    fn from(e: ColorError) -> Self {
-        Self::Color(e)
     }
 }
 

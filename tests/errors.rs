@@ -1,4 +1,4 @@
-use subband::{DecodeError, FormatError, Image, ValidationError};
+use subband::{DecodeError, Image, ValidationError};
 
 use crate::*;
 
@@ -136,13 +136,4 @@ fn unsupported_component_count() {
         .err()
         .expect("more than 4 components should fail");
     assert_eq!(err, DecodeError::Validation(ValidationError::Unsupported));
-}
-
-#[test]
-fn unsupported_color_channels() {
-    let data = read_stream("codestream_gray");
-    let err = Image::from_codestream(&data, 4, &DecodeSettings::default())
-        .err()
-        .expect("non-texture color channel count should fail");
-    assert_eq!(err, DecodeError::Format(FormatError::Unsupported));
 }

@@ -5,7 +5,7 @@ use crate::error::{FormatError, Result, bail};
 use crate::j2c::ComponentData;
 use crate::jp2::r#box::{FILE_TYPE, JP2_SIGNATURE};
 use crate::reader::BitReader;
-use crate::{DecodeSettings, Image, resolve_alpha_and_color_space};
+use crate::{DecodeSettings, Image};
 
 pub(crate) mod r#box;
 
@@ -57,13 +57,10 @@ pub(crate) fn parse<'a>(data: &'a [u8], settings: DecodeSettings) -> Result<Imag
     }
 
     let parsed_codestream = parsed_codestream.ok_or(FormatError::MissingCodestream)?;
-    let (color_space, has_alpha) = resolve_alpha_and_color_space(&parsed_codestream.header)?;
 
     Ok(Image {
         codestream: parsed_codestream.data,
         header: parsed_codestream.header,
         settings,
-        color_space,
-        has_alpha,
     })
 }

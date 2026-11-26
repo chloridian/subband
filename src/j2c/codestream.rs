@@ -60,7 +60,7 @@ pub(crate) fn read_header<'a>(
             markers::COC => {
                 reader.read_marker()?;
                 let (component_index, coc) =
-                    coc_marker(reader, num_components).ok_or(MarkerError::ParseFailure("COC"))?;
+                    coc_marker(reader).ok_or(MarkerError::ParseFailure("COC"))?;
                 *cod_components
                     .get_mut(component_index as usize)
                     .ok_or(MarkerError::ParseFailure("COC"))? = Some(coc);
@@ -72,7 +72,7 @@ pub(crate) fn read_header<'a>(
             markers::QCC => {
                 reader.read_marker()?;
                 let (component_index, qcc) =
-                    qcc_marker(reader, num_components).ok_or(MarkerError::ParseFailure("QCC"))?;
+                    qcc_marker(reader).ok_or(MarkerError::ParseFailure("QCC"))?;
                 *qcd_components
                     .get_mut(component_index as usize)
                     .ok_or(MarkerError::ParseFailure("QCC"))? = Some(qcc);
@@ -80,7 +80,7 @@ pub(crate) fn read_header<'a>(
             markers::RGN => {
                 reader.read_marker()?;
                 let (component_index, roi_shift) =
-                    rgn_marker(reader, num_components).ok_or(MarkerError::ParseFailure("RGN"))?;
+                    rgn_marker(reader).ok_or(MarkerError::ParseFailure("RGN"))?;
                 *roi_shifts
                     .get_mut(component_index as usize)
                     .ok_or(MarkerError::ParseFailure("RGN"))? = roi_shift;
@@ -99,9 +99,8 @@ pub(crate) fn read_header<'a>(
             }
             markers::POC => {
                 reader.read_marker()?;
-                progression_changes.extend(
-                    poc_marker(reader, num_components).ok_or(MarkerError::ParseFailure("POC"))?,
-                );
+                progression_changes
+                    .extend(poc_marker(reader).ok_or(MarkerError::ParseFailure("POC"))?);
             }
             markers::CRG => {
                 reader.read_marker()?;
@@ -622,15 +621,9 @@ fn ppm_packets(mut markers: Vec<PpmMarkerData<'_>>) -> Option<Vec<PpmPacket>> {
     Some(packets)
 }
 
-pub(crate) fn rgn_marker(reader: &mut BitReader<'_>, csiz: u16) -> Option<(u16, u8)> {
+pub(crate) fn rgn_marker(reader: &mut BitReader<'_>) -> Option<(u16, u8)> {
     let _ = reader.read_u16()?;
-
-    let component_index = if csiz < 257 {
-        reader.read_byte()? as u16
-    } else {
-        reader.read_u16()?
-    };
-
+    let component_index = u16::from(reader.read_byte()?);
     let roi_style = reader.read_byte()?;
     let roi_shift = reader.read_byte()?;
 
@@ -671,17 +664,10 @@ pub(crate) fn cod_marker(reader: &mut BitReader<'_>) -> Option<CodingStyleDefaul
     })
 }
 
-pub(crate) fn coc_marker(
-    reader: &mut BitReader<'_>,
-    csiz: u16,
-) -> Option<(u16, CodingStyleComponent)> {
+pub(crate) fn coc_marker(reader: &mut BitReader<'_>) -> Option<(u16, CodingStyleComponent)> {
     let _ = reader.read_u16()?;
 
-    let component_index = if csiz < 257 {
-        reader.read_byte()? as u16
-    } else {
-        reader.read_u16()?
-    };
+    let component_index = u16::from(reader.read_byte()?);
     let coding_style = CodingStyleFlags::from_u8(reader.read_byte()?);
 
     let parameters = coding_style_parameters(reader, &coding_style)?;
@@ -694,28 +680,18 @@ pub(crate) fn coc_marker(
     Some((component_index, coc))
 }
 
-pub(crate) fn poc_marker(reader: &mut BitReader<'_>, csiz: u16) -> Option<Vec<ProgressionChange>> {
+pub(crate) fn poc_marker(reader: &mut BitReader<'_>) -> Option<Vec<ProgressionChange>> {
     let length = reader.read_u16()?.checked_sub(2)?;
     let mut reader = BitReader::new(reader.read_bytes(length as usize)?);
 
-    let read_component_index = |reader: &mut BitReader<'_>| {
-        if csiz < 257 {
-            reader.read_byte().map(u16::from)
-        } else {
-            reader.read_u16()
-        }
-    };
-
-    let entry_size = if csiz < 257 { 7 } else { 9 };
-
-    (0..length as usize / entry_size)
+    (0..length as usize / 7)
         .map(|_| {
             Some(ProgressionChange {
                 resolution_start: reader.read_byte()?,
-                component_start: read_component_index(&mut reader)?,
+                component_start: u16::from(reader.read_byte()?),
                 layer_end: reader.read_u16()?,
                 resolution_end: reader.read_byte()?,
-                component_end: match read_component_index(&mut reader)? {
+                component_end: match u16::from(reader.read_byte()?) {
                     0 => 256,
                     index => index,
                 },
@@ -740,24 +716,15 @@ pub(crate) fn qcd_marker(reader: &mut BitReader<'_>) -> Option<QuantizationInfo>
     Some(parameters)
 }
 
-pub(crate) fn qcc_marker(reader: &mut BitReader<'_>, csiz: u16) -> Option<(u16, QuantizationInfo)> {
+pub(crate) fn qcc_marker(reader: &mut BitReader<'_>) -> Option<(u16, QuantizationInfo)> {
     let length = reader.read_u16()?;
-
-    let component_index = if csiz < 257 {
-        reader.read_byte()? as u16
-    } else {
-        reader.read_u16()?
-    };
+    let component_index = u16::from(reader.read_byte()?);
 
     let sqcc_val = reader.read_byte()?;
     let quantization_style = QuantizationStyle::from_u8(sqcc_val & 0x1F).ok()?;
     let guard_bits = (sqcc_val >> 5) & 0x07;
 
-    let component_index_size = if csiz < 257 { 1 } else { 2 };
-    let remaining_bytes = length
-        .checked_sub(2)?
-        .checked_sub(component_index_size)?
-        .checked_sub(1)? as usize;
+    let remaining_bytes = length.checked_sub(4)? as usize;
 
     let mut parameters = quantization_parameters(reader, quantization_style, remaining_bytes)?;
     parameters.guard_bits = guard_bits;
