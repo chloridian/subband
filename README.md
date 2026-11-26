@@ -1,9 +1,6 @@
-<!-- cargo-rdme start -->
+# Subband
 
-Subband is a fork of [hayro-jpeg2000](https://github.com/LaurenzV/hayro), tuned for the
-textures Second Life serves: raw JPEG 2000 codestreams (`.j2c`) from untrusted sources,
-decoded at reduced resolution and cancelled when no longer needed. It also unwraps the
-JP2 container format to decode its codestream. An encoder is planned.
+Subband is a pure-Rust JPEG 2000 decoder for Second Life textures: raw J2C codestreams from untrusted sources, decoded at reduced resolution and cancellable when a texture fetch is dropped. It also unwraps the JP2 container format to decode its codestream.
 
 ## Example
 
@@ -22,22 +19,6 @@ let mut ctx = DecoderContext::default();
 let decoded = image.decode(&mut ctx).unwrap();
 let pixels = decoded.data_u8().unwrap();
 ```
-
-## Testing
-
-Before the fork, hayro-jpeg2000 was tested against more than 20,000 images taken from
-PDFs, and it passes a large part of the `OpenJPEG` test suite.
-
-## Safety
-
-By default, the crate has the `simd` feature enabled, which uses the
-[`fearless_simd`](https://github.com/linebender/fearless_simd) crate to accelerate
-important parts of the pipeline. If you want to eliminate any usage of unsafe
-in this crate as well as its dependencies, you can simply disable this
-feature, at the cost of slower decoding. Unsafe code is forbidden
-via a crate-level attribute.
-
-<!-- cargo-rdme end -->
 
 ## License
 
