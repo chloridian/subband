@@ -213,16 +213,16 @@ fn build_code_blocks(
             let area = IntRect::from_xywh(x, y, code_block_width, code_block_height)
                 .intersect(sub_band_rect);
 
-            let layers = if allocate_layers {
-                let start = storage.layers.len();
-                storage.layers.extend(iter::repeat_n(
-                    Layer { segments: None },
-                    tile.num_layers as usize,
-                ));
-                let end = storage.layers.len();
-                start..end
+            let (layers_start, layers_end) = if allocate_layers {
+                let start =
+                    u32::try_from(storage.layers.len()).map_err(|_| DecodeError::TooLarge)?;
+                storage
+                    .layers
+                    .extend(iter::repeat_n(Layer::EMPTY, tile.num_layers as usize));
+                let end = u32::try_from(storage.layers.len()).map_err(|_| DecodeError::TooLarge)?;
+                (start, end)
             } else {
-                0..0
+                (0, 0)
             };
 
             storage.code_blocks.push(CodeBlock {
@@ -233,7 +233,8 @@ fn build_code_blocks(
                 missing_bit_planes: 0,
                 l_block: 3,
                 number_of_coding_passes: 0,
-                layers,
+                layers_start,
+                layers_end,
                 non_empty_layer_count: 0,
             });
 
@@ -288,22 +289,44 @@ pub(crate) struct CodeBlock {
     pub(crate) rect: IntRect,
     pub(crate) x_idx: u32,
     pub(crate) y_idx: u32,
-    pub(crate) layers: Range<usize>,
+    pub(crate) layers_start: u32,
+    pub(crate) layers_end: u32,
+    pub(crate) l_block: u32,
     pub(crate) has_been_included: bool,
     pub(crate) missing_bit_planes: u8,
     pub(crate) number_of_coding_passes: u8,
-    pub(crate) l_block: u32,
     pub(crate) non_empty_layer_count: u8,
 }
 
-pub(crate) struct Segment {
-    pub(crate) idx: u8,
-    pub(crate) coding_pases: u8,
-    pub(crate) data_length: u32,
-    pub(crate) data: Range<usize>,
+impl CodeBlock {
+    pub(crate) fn layers_range(&self) -> Range<usize> {
+        self.layers_start as usize..self.layers_end as usize
+    }
 }
 
-#[derive(Clone)]
+pub(crate) struct Segment {
+    pub(crate) data_start: usize,
+    pub(crate) data_length: u32,
+    pub(crate) idx: u8,
+    pub(crate) coding_pases: u8,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct Layer {
-    pub(crate) segments: Option<Range<usize>>,
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+}
+
+impl Layer {
+    pub(crate) const EMPTY: Self = Self { start: 0, end: 0 };
+
+    pub(crate) fn segments(self) -> Option<Range<usize>> {
+        (self.start < self.end).then_some(self.start as usize..self.end as usize)
+    }
+
+    pub(crate) fn take(&mut self) -> Option<Range<usize>> {
+        let range = self.segments();
+        *self = Self::EMPTY;
+        range
+    }
 }

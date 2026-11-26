@@ -1,6 +1,6 @@
 use core::result;
 
-use super::build::{Segment, can_stop_at_discard, max_decoded_resolutions};
+use super::build::{Layer, Segment, can_stop_at_discard, max_decoded_resolutions};
 use super::codestream::markers::{EOC, EPH, SOP};
 use super::codestream::{ComponentInfo, Header};
 use super::decode::{DecompositionStorage, SubBandIter};
@@ -237,9 +237,9 @@ fn parse_packet(
                 let seg_range = storage
                     .code_blocks
                     .get(cb_idx)
-                    .and_then(|cb| storage.layers.get(cb.layers.clone()))
+                    .and_then(|cb| storage.layers.get(cb.layers_range()))
                     .and_then(|layers| layers.get(layer_num))
-                    .and_then(|layer| layer.segments.clone());
+                    .and_then(|layer| layer.segments());
 
                 if let Some(seg_range) = seg_range {
                     let segments = storage
@@ -253,10 +253,10 @@ fn parse_packet(
                             .checked_add(body_reader.offset())
                             .ok_or(PacketError::Malformed)?;
                         if let Some(bytes) = body_reader.read_bytes(segment.data_length as usize) {
-                            let end = start
+                            start
                                 .checked_add(bytes.len())
                                 .ok_or(PacketError::Malformed)?;
-                            segment.data = start..end;
+                            segment.data_start = start;
                         } else {
                             complete = false;
                             break;
@@ -310,9 +310,9 @@ fn rollback_code_block(cb_idx: usize, layer_num: usize, storage: &mut Decomposit
     };
     let Some(seg_range) = storage
         .layers
-        .get_mut(code_block.layers.clone())
+        .get_mut(code_block.layers_range())
         .and_then(|layers| layers.get_mut(layer_num))
-        .and_then(|layer| layer.segments.take())
+        .and_then(Layer::take)
     else {
         return;
     };
@@ -390,7 +390,7 @@ fn resolve_segments(
 
         let layer = storage
             .layers
-            .get_mut(code_block.layers.clone())
+            .get_mut(code_block.layers_range())
             .and_then(|layers| layers.get_mut(progression_data.layer_num as usize))
             .ok_or(PacketError::Malformed)?;
 
@@ -461,7 +461,7 @@ fn resolve_segments(
                 idx: segment,
                 data_length: length,
                 coding_pases: coding_passes_for_segment,
-                data: 0..0,
+                data_start: 0,
             });
 
             Ok(())
@@ -486,8 +486,9 @@ fn resolve_segments(
             push_segment(last_segment, coding_passes_for_segment)?;
         }
 
-        let end = storage.segments.len();
-        layer.segments = Some(start..end);
+        let start = u32::try_from(start).map_err(|_| PacketError::Malformed)?;
+        let end = u32::try_from(storage.segments.len()).map_err(|_| PacketError::Malformed)?;
+        *layer = Layer { start, end };
         code_block.number_of_coding_passes += added_coding_passes;
         code_block.non_empty_layer_count += 1;
     }

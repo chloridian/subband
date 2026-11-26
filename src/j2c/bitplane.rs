@@ -52,11 +52,11 @@ fn decode_inner(
 
     for layer in storage
         .layers
-        .get(code_block.layers.clone())?
+        .get(code_block.layers_range())?
         .iter()
         .take(layer_limit)
     {
-        if let Some(range) = layer.segments.clone() {
+        if let Some(range) = layer.segments() {
             let layer_segments = storage.segments.get(range)?;
             for segment in layer_segments {
                 if segment.idx != last_segment_idx {
@@ -69,7 +69,10 @@ fn decode_inner(
                     last_segment_idx += 1;
                 }
 
-                let bytes = codestream.get(segment.data.clone())?;
+                let end = segment
+                    .data_start
+                    .checked_add(segment.data_length as usize)?;
+                let bytes = codestream.get(segment.data_start..end)?;
                 bp_buffers.combined_layers.extend_from_slice(bytes);
                 coding_passes += segment.coding_pases;
             }
