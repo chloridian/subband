@@ -6,6 +6,7 @@ mod inspect;
 mod jp2;
 mod mct;
 mod packets;
+mod prefix;
 mod quantization;
 mod roi;
 mod tile_parts;
