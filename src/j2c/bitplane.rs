@@ -167,9 +167,6 @@ fn handle_coding_passes(
     Some(())
 }
 
-// We only allow 31 bit planes because we need one bit for the sign.
-pub(crate) const BITPLANE_BIT_SIZE: u32 = size_of::<u32>() as u32 * 8 - 1;
-
 const SIGNIFICANCE_SHIFT: u8 = 7;
 const HAS_MAGNITUDE_REFINEMENT_SHIFT: u8 = 6;
 const HAS_ZERO_CODING_SHIFT: u8 = 5;

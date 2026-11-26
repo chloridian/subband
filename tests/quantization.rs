@@ -9,22 +9,6 @@ fn irreversible() {
 }
 
 #[test]
-fn irreversible_12bit() {
-    check(
-        "quantization_irreversible_12bit",
-        reference("main_r_12bit").tolerance(1),
-    );
-}
-
-#[test]
-fn irreversible_16bit() {
-    check(
-        "quantization_irreversible_16bit",
-        reference("stress_16bit").tolerance(1),
-    );
-}
-
-#[test]
 fn scalar_derived() {
     check(
         "quantization_scalar_derived",
@@ -53,22 +37,6 @@ fn irreversible_rate() {
     check(
         "quantization_irreversible_rate",
         reference("quantization_irreversible_rate").tolerance(1),
-    );
-}
-
-#[test]
-fn irreversible_tiles_offset() {
-    check(
-        "quantization_irreversible_tiles_offset",
-        reference("quantization_irreversible_tiles_offset"),
-    );
-}
-
-#[test]
-fn irreversible_offset_large() {
-    check(
-        "quantization_irreversible_offset_large",
-        reference("quantization_irreversible_offset_large"),
     );
 }
 

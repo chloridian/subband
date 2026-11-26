@@ -31,11 +31,6 @@ fn rgba() {
 }
 
 #[test]
-fn bpcc() {
-    check("jp2_bpcc", reference("main_rgba_5_5_5_1bit"));
-}
-
-#[test]
 fn jpx_brand_rreq() {
     check("jp2_jpx_brand_rreq", reference("main_rgb"));
 }

@@ -62,8 +62,6 @@ pub enum TileError {
     Invalid,
     /// Invalid tile index in tile-part header.
     InvalidIndex,
-    /// Invalid tile or image offsets.
-    InvalidOffsets,
     /// PPT marker present when PPM marker exists in main header.
     PpmPptConflict,
 }
@@ -91,6 +89,8 @@ pub enum ValidationError {
     MissingStepSize,
     /// Invalid quantization exponents.
     InvalidExponents,
+    /// Valid codestream feature outside the texture profile.
+    Unsupported,
 }
 
 /// Errors related to decoding operations.
@@ -168,7 +168,6 @@ impl fmt::Display for TileError {
         match self {
             Self::Invalid => write!(f, "image contains no tiles"),
             Self::InvalidIndex => write!(f, "invalid tile index in tile-part header"),
-            Self::InvalidOffsets => write!(f, "invalid tile offsets"),
             Self::PpmPptConflict => {
                 write!(
                     f,
@@ -196,6 +195,7 @@ impl fmt::Display for ValidationError {
             }
             Self::MissingStepSize => write!(f, "missing exponent step size"),
             Self::InvalidExponents => write!(f, "invalid quantization exponents"),
+            Self::Unsupported => write!(f, "unsupported texture profile feature"),
         }
     }
 }

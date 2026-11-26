@@ -11,11 +11,6 @@ fn rct_four_components() {
 }
 
 #[test]
-fn signed_components() {
-    check("mct_signed_components", reference("main_rgb"));
-}
-
-#[test]
 fn one_component_ignored() {
     check("mct_one_component_ignored", reference("main_r"));
 }

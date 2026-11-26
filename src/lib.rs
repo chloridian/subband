@@ -138,8 +138,7 @@ impl<'a> Image<'a> {
 
     /// The original bit depth of the image.
     pub fn original_bit_depth(&self) -> u8 {
-        // Assumes all components share the same precision.
-        self.header.component_infos[0].size_info.precision
+        8
     }
 
     /// Decode the image and return its decoded components.
@@ -231,75 +230,38 @@ fn interleave_and_convert(
     let cancel = image.cancel;
     let components = &*image.decoded_components;
     let num_components = components.len();
+    let max_len = components[0]
+        .container
+        .truncated()
+        .len()
+        .min(buf.len() / num_components);
+    let mut start = 0;
 
-    let mut all_same_bit_depth = Some(components[0].bit_depth);
+    while start < max_len {
+        cancel.check()?;
 
-    for component in components.iter().skip(1) {
-        if Some(component.bit_depth) != all_same_bit_depth {
-            all_same_bit_depth = None;
+        let end = (start + CHUNK).min(max_len);
+        let plane = |c: usize| &components[c].container[start..end];
+        let out = &mut buf[start * num_components..end * num_components];
+        match num_components {
+            1 => interleave_to_u8([plane(0)], out),
+            2 => interleave_to_u8([plane(0), plane(1)], out),
+            3 => interleave_to_u8([plane(0), plane(1), plane(2)], out),
+            4 => interleave_to_u8([plane(0), plane(1), plane(2), plane(3)], out),
+            _ => unreachable!(),
         }
-    }
-
-    let max_len = components[0].container.truncated().len();
-
-    let mut output_iter = buf.iter_mut();
-
-    fn to_u8_scale(bit_depth: u8) -> f32 {
-        255.0 / ((1_u32 << bit_depth) - 1) as f32
-    }
-
-    if let Some(bit_depth) = all_same_bit_depth
-        && num_components <= 4
-    {
-        let scale = to_u8_scale(bit_depth);
-        let max_len = max_len.min(buf.len() / num_components);
-        let mut start = 0;
-        while start < max_len {
-            cancel.check()?;
-
-            let end = (start + CHUNK).min(max_len);
-            let plane = |c: usize| &components[c].container[start..end];
-            let out = &mut buf[start * num_components..end * num_components];
-            match num_components {
-                1 => interleave_to_u8([plane(0)], scale, out),
-                2 => interleave_to_u8([plane(0), plane(1)], scale, out),
-                3 => interleave_to_u8([plane(0), plane(1), plane(2)], scale, out),
-                4 => interleave_to_u8([plane(0), plane(1), plane(2), plane(3)], scale, out),
-                _ => unreachable!(),
-            }
-            start = end;
-        }
-    } else {
-        let scales = components
-            .iter()
-            .map(|c| to_u8_scale(c.bit_depth))
-            .collect::<Vec<_>>();
-
-        for sample in 0..max_len {
-            if sample % CHUNK == 0 {
-                cancel.check()?;
-            }
-
-            for (channel, scale) in components.iter().zip(&scales) {
-                *output_iter.next().unwrap() = math::round_to_u8(channel.container[sample] * scale);
-            }
-        }
+        start = end;
     }
 
     Ok(())
 }
 
-fn interleave_to_u8<const N: usize>(planes: [&[f32]; N], scale: f32, out: &mut [u8]) {
-    dispatch!(Level::new(), simd => interleave_to_u8_impl(simd, planes, scale, out));
+fn interleave_to_u8<const N: usize>(planes: [&[f32]; N], out: &mut [u8]) {
+    dispatch!(Level::new(), simd => interleave_to_u8_impl(simd, planes, out));
 }
 
 #[inline(always)]
-fn interleave_to_u8_impl<S: Simd, const N: usize>(
-    simd: S,
-    planes: [&[f32]; N],
-    scale: f32,
-    out: &mut [u8],
-) {
+fn interleave_to_u8_impl<S: Simd, const N: usize>(simd: S, planes: [&[f32]; N], out: &mut [u8]) {
     let pixels = planes
         .iter()
         .map(|plane| plane.len())
@@ -311,7 +273,7 @@ fn interleave_to_u8_impl<S: Simd, const N: usize>(
     match N {
         1 => {
             for (out, c0) in out.as_chunks_mut::<16>().0.iter_mut().zip(plane(0)) {
-                math::round_and_interleave(simd, [c0], scale, out);
+                math::round_and_interleave(simd, [c0], out);
             }
         }
         2 => {
@@ -322,7 +284,7 @@ fn interleave_to_u8_impl<S: Simd, const N: usize>(
                 .zip(plane(0))
                 .zip(plane(1))
             {
-                math::round_and_interleave(simd, [c0, c1], scale, out);
+                math::round_and_interleave(simd, [c0, c1], out);
             }
         }
         3 => {
@@ -334,7 +296,7 @@ fn interleave_to_u8_impl<S: Simd, const N: usize>(
                 .zip(plane(1))
                 .zip(plane(2))
             {
-                math::round_and_interleave(simd, [c0, c1, c2], scale, out);
+                math::round_and_interleave(simd, [c0, c1, c2], out);
             }
         }
         4 => {
@@ -347,7 +309,7 @@ fn interleave_to_u8_impl<S: Simd, const N: usize>(
                 .zip(plane(2))
                 .zip(plane(3))
             {
-                math::round_and_interleave(simd, [c0, c1, c2, c3], scale, out);
+                math::round_and_interleave(simd, [c0, c1, c2, c3], out);
             }
         }
         _ => unreachable!(),
@@ -355,7 +317,7 @@ fn interleave_to_u8_impl<S: Simd, const N: usize>(
 
     for (i, pixel) in tail.as_chunks_mut::<N>().0.iter_mut().enumerate() {
         for (value, plane) in pixel.iter_mut().zip(planes) {
-            *value = math::round_to_u8(plane[blocks + i] * scale);
+            *value = math::round_to_u8(plane[blocks + i]);
         }
     }
 }

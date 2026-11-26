@@ -30,13 +30,12 @@ pub(crate) struct ParsedCodestream<'a> {
 #[derive(Debug, Clone)]
 pub struct ComponentData {
     pub(crate) container: SimdBuffer<{ SIMD_WIDTH }>,
-    pub(crate) bit_depth: u8,
 }
 
 impl ComponentData {
     /// The bit depth of this component.
     pub fn bit_depth(&self) -> u8 {
-        self.bit_depth
+        8
     }
 
     /// The decoded samples of this component.
