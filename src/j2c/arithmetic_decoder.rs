@@ -76,35 +76,6 @@ impl<'a> ArithmeticDecoder<'a> {
     }
 
     #[inline(always)]
-    #[expect(unused, reason = "for reference")]
-    fn exchange_lps(&mut self, context: &mut ArithmeticDecoderContext, qe_entry: &QeData) -> u32 {
-        let cond = (self.a < qe_entry.qe) as u32;
-        let inv_cond = 1 - cond;
-
-        self.a = qe_entry.qe;
-        let d = context.mps() ^ inv_cond;
-        context.xor_mps(inv_cond & (qe_entry.switch as u32));
-        let cond_u8 = cond as u8;
-        let inv_cond_u8 = inv_cond as u8;
-        context.set_index(cond_u8 * qe_entry.nmps + inv_cond_u8 * qe_entry.nlps);
-
-        d
-    }
-
-    #[inline(always)]
-    #[expect(unused, reason = "for reference")]
-    fn exchange_mps(&mut self, context: &mut ArithmeticDecoderContext, qe_entry: &QeData) -> u32 {
-        let cond = (self.a < qe_entry.qe) as u32;
-        let inv_cond = 1 - cond;
-        let d = context.mps() ^ cond;
-        context.xor_mps(cond & (qe_entry.switch as u32));
-        let cond_u8 = cond as u8;
-        let inv_cond_u8 = inv_cond as u8;
-        context.set_index(cond_u8 * qe_entry.nlps + inv_cond_u8 * qe_entry.nmps);
-        d
-    }
-
-    #[inline(always)]
     pub(crate) fn decode(&mut self, context: &mut ArithmeticDecoderContext) -> u32 {
         let qe_entry = &QE_TABLE[context.index() as usize];
 

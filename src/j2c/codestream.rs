@@ -870,10 +870,6 @@ fn quantization_parameters(
     })
 }
 
-#[expect(
-    unused,
-    reason = "Not all marker codes are used in every decoding path yet"
-)]
 pub(crate) mod markers {
     pub(crate) const SOC: u8 = 0x4F;
     pub(crate) const SOT: u8 = 0x90;
@@ -890,7 +886,6 @@ pub(crate) mod markers {
     pub(crate) const POC: u8 = 0x5F;
 
     pub(crate) const TLM: u8 = 0x55;
-    pub(crate) const PLM: u8 = 0x57;
     pub(crate) const PLT: u8 = 0x58;
     pub(crate) const PPM: u8 = 0x60;
     pub(crate) const PPT: u8 = 0x61;
@@ -900,36 +895,4 @@ pub(crate) mod markers {
 
     pub(crate) const CRG: u8 = 0x63;
     pub(crate) const COM: u8 = 0x64;
-
-    pub(crate) fn to_string(marker: u8) -> &'static str {
-        match marker {
-            SOC => "SOC",
-            SOT => "SOT",
-            SOD => "SOD",
-            EOC => "EOC",
-
-            SIZ => "SIZ",
-
-            COD => "COD",
-            COC => "COC",
-            RGN => "RGN",
-            QCD => "QCD",
-            QCC => "QCC",
-            POC => "POC",
-
-            TLM => "TLM",
-            PLM => "PLM",
-            PLT => "PLT",
-            PPM => "PPM",
-            PPT => "PPT",
-
-            SOP => "SOP",
-            EPH => "EPH",
-
-            CRG => "CRG",
-            COM => "COM",
-
-            _ => "UNKNOWN",
-        }
-    }
 }
