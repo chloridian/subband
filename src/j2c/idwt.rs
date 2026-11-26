@@ -246,14 +246,17 @@ fn filter_2d_first(
     header: &Header,
     cancel: Cancel<'_>,
 ) -> Result<IDWTTempOutput> {
+    let width = decomposition.rect.width() as usize;
+    let height = decomposition.rect.height() as usize;
+    assert!(coefficients.capacity() >= width * height);
+    cancel.resize(coefficients, width * height)?;
+    if width == 0 || height == 0 {
+        return Ok(IDWTTempOutput {
+            rect: decomposition.rect,
+        });
+    }
+
     dispatch!(Level::new(), simd => {
-        let width = decomposition.rect.width() as usize;
-        let height = decomposition.rect.height() as usize;
-        assert!(coefficients.capacity() >= width * height);
-        cancel.resize(coefficients, width * height)?;
-        if width == 0 || height == 0 {
-            return Ok(());
-        }
         let transform = component_info.wavelet_transform();
         let IntRect {
             x0: u0,
@@ -338,14 +341,17 @@ fn filter_2d(
     header: &Header,
     cancel: Cancel<'_>,
 ) -> Result<IDWTTempOutput> {
+    let width = decomposition.rect.width() as usize;
+    let height = decomposition.rect.height() as usize;
+    assert!(coefficients.capacity() >= width * height);
+    cancel.resize(coefficients, width * height)?;
+    if width == 0 || height == 0 {
+        return Ok(IDWTTempOutput {
+            rect: decomposition.rect,
+        });
+    }
+
     dispatch!(Level::new(), simd => {
-        let width = decomposition.rect.width() as usize;
-        let height = decomposition.rect.height() as usize;
-        assert!(coefficients.capacity() >= width * height);
-        cancel.resize(coefficients, width * height)?;
-        if width == 0 || height == 0 {
-            return Ok(());
-        }
         let transform = component_info.wavelet_transform();
         let IntRect {
             x0: u0,
