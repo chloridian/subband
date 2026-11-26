@@ -1,7 +1,5 @@
 <!-- cargo-rdme start -->
 
-A memory-safe, pure-Rust JPEG 2000 codec for Second Life textures.
-
 Subband is a fork of [hayro-jpeg2000](https://github.com/LaurenzV/hayro), tuned for the
 textures Second Life serves: raw JPEG 2000 codestreams (`.j2c`) from untrusted sources,
 decoded at reduced resolution and cancelled when no longer needed. It still decodes the
