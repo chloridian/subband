@@ -5,6 +5,7 @@ mod errors;
 mod inspect;
 mod jp2;
 mod mct;
+mod output;
 mod packets;
 mod prefix;
 mod quantization;

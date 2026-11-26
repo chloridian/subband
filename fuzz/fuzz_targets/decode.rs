@@ -24,7 +24,8 @@ fn run(data: &[u8], strict: bool) {
     let mut ctx = DecoderContext::default();
     if let Ok(decoded) = image.decode(&mut ctx) {
         let _ = decoded.layers_received();
-        let _ = decoded.data_u8();
+        let mut buf = vec![0; decoded.buffer_len()];
+        let _ = decoded.write_to(&mut buf);
     }
 }
 

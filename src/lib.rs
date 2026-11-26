@@ -1,26 +1,22 @@
 #![forbid(unsafe_code)]
 
-use core::result;
+mod cancel;
+pub mod error;
+mod j2c;
+mod jp2;
+pub(crate) mod math;
+pub(crate) mod reader;
+
 use std::vec;
 use std::vec::Vec;
 
+use crate::cancel::{CHUNK, Cancel};
+pub use crate::cancel::{CancelCheck, CancelHandle};
+pub use crate::error::{DecodeError, Result};
 use crate::j2c::Header;
-
-mod cancel;
-pub mod error;
-pub(crate) mod math;
-
-use cancel::{CHUNK, Cancel};
-pub use cancel::{CancelCheck, CancelHandle};
-
+pub use crate::j2c::{ComponentData, DecoderContext, Inspection};
+pub use crate::jp2::DecodedImage;
 use crate::math::{Level, Simd, dispatch};
-pub use error::{Cancelled, DecodeError, Result};
-pub use j2c::{ComponentData, DecoderContext, Inspection};
-pub use jp2::DecodedImage;
-
-mod j2c;
-mod jp2;
-pub(crate) mod reader;
 
 pub(crate) const JP2_MAGIC: &[u8] = b"\x00\x00\x00\x0C\x6A\x50\x20\x20";
 pub(crate) const CODESTREAM_MAGIC: &[u8] = b"\xFF\x4F\xFF\x51";
@@ -127,16 +123,26 @@ impl DecodedImage<'_> {
         self.layers_received
     }
 
-    pub fn data_u8(&self) -> result::Result<Vec<u8>, Cancelled> {
+    pub fn buffer_len(&self) -> usize {
         let components = self.components();
-        let buffer_size = components.first().map_or(0, |c| c.samples().len()) * components.len();
-        let mut buf = vec![0; buffer_size];
-        self.store_u8_into(&mut buf)?;
+        components
+            .first()
+            .map_or(0, |c| c.samples().len())
+            .saturating_mul(components.len())
+    }
+
+    pub fn data_u8(&self) -> Result<Vec<u8>> {
+        let mut buf = vec![0; self.buffer_len()];
+        self.write_to(&mut buf)?;
 
         Ok(buf)
     }
 
-    pub fn store_u8_into(&self, buf: &mut [u8]) -> result::Result<(), Cancelled> {
+    pub fn write_to(&self, buf: &mut [u8]) -> Result<()> {
+        if buf.len() != self.buffer_len() {
+            return Err(DecodeError::BufferSize);
+        }
+
         interleave_and_convert(self, buf)
     }
 }
@@ -153,21 +159,14 @@ pub fn inspect(data: &[u8], settings: &DecodeSettings) -> Result<Inspection> {
     }
 }
 
-fn interleave_and_convert(
-    image: &DecodedImage<'_>,
-    buf: &mut [u8],
-) -> result::Result<(), Cancelled> {
+fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) -> Result<()> {
     let cancel = image.cancel;
     let components = &*image.decoded_components;
     let Some(first) = components.first() else {
         return Ok(());
     };
     let num_components = components.len();
-    let max_len = first
-        .container
-        .truncated()
-        .len()
-        .min(buf.len() / num_components);
+    let max_len = first.container.truncated().len();
     let mut start = 0;
 
     while start < max_len {

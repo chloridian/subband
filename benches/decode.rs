@@ -17,9 +17,15 @@ fn reused<const DISCARD: u8>(bencher: Bencher<'_, '_>, fixture: &Fixture) {
     let settings = settings(true, DISCARD);
     let image = Image::from_codestream(fixture.bytes, &settings).expect("fixture parses");
     let mut ctx = DecoderContext::default();
+    let len = image
+        .decode(&mut ctx)
+        .expect("fixture decodes")
+        .buffer_len();
+    let mut buf = vec![0; len];
     bencher.bench_local(|| {
         let decoded = image.decode(&mut ctx).expect("fixture decodes");
-        black_box(decoded.data_u8().expect("not cancelled"));
+        decoded.write_to(&mut buf).expect("not cancelled");
+        black_box(&buf);
     });
 }
 
@@ -35,7 +41,9 @@ fn run(bencher: Bencher<'_, '_>, data: &[u8], strict: bool, discard: u8) {
         let image = Image::from_codestream(black_box(data), &settings).expect("fixture parses");
         let mut ctx = DecoderContext::default();
         let decoded = image.decode(&mut ctx).expect("fixture decodes");
-        black_box(decoded.data_u8().expect("not cancelled"));
+        let mut buf = vec![0; decoded.buffer_len()];
+        decoded.write_to(&mut buf).expect("not cancelled");
+        black_box(buf);
     });
 }
 

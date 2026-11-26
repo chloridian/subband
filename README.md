@@ -15,7 +15,8 @@ let image = Image::from_codestream(&data, &settings).unwrap();
 
 let mut ctx = DecoderContext::default();
 let decoded = image.decode(&mut ctx).unwrap();
-let pixels = decoded.data_u8().unwrap();
+let mut pixels = vec![0; decoded.buffer_len()];
+decoded.write_to(&mut pixels).unwrap();
 ```
 
 ## License
