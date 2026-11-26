@@ -22,9 +22,6 @@ let decoded = image.decode(&mut ctx).unwrap();
 let pixels = decoded.data_u8().unwrap();
 ```
 
-The [`png` example](https://github.com/hymenaei/subband/blob/main/examples/png.rs)
-converts a JPEG 2000 image to PNG through the `image` crate.
-
 # Testing
 Before the fork, hayro-jpeg2000 was tested against more than 20,000 images taken from
 PDFs, and it passes a large part of the `OpenJPEG` test suite.
@@ -55,7 +52,6 @@ use crate::jp2::ImageBoxes;
 use crate::jp2::cdef::{ChannelAssociation, ChannelType};
 use crate::jp2::cmap::ComponentMappingType;
 use crate::jp2::colr::{CieLab, EnumeratedColorspace};
-use crate::jp2::icc::ICCMetadata;
 
 mod cancel;
 pub mod error;
@@ -73,8 +69,6 @@ pub use error::{
 pub use j2c::{ComponentData, DecoderContext};
 pub use jp2::DecodedImage;
 
-#[cfg(feature = "image")]
-pub mod integration;
 mod j2c;
 mod jp2;
 pub(crate) mod reader;
@@ -291,13 +285,6 @@ pub enum ColorSpace {
         /// The number of channels of the color space.
         num_channels: u8,
     },
-    /// An image based on an ICC profile.
-    Icc {
-        /// The raw data of the ICC profile.
-        profile: Vec<u8>,
-        /// The number of channels used by the ICC profile.
-        num_channels: u8,
-    },
 }
 
 impl ColorSpace {
@@ -308,10 +295,6 @@ impl ColorSpace {
             Self::RGB => 3,
             Self::CMYK => 4,
             Self::Unknown { num_channels } => *num_channels,
-            Self::Icc {
-                num_channels: num_components,
-                ..
-            } => *num_components,
         }
     }
 }
@@ -532,30 +515,12 @@ fn get_color_space(boxes: &ImageBoxes, num_components: usize) -> Result<ColorSpa
         jp2::colr::ColorSpace::Enumerated(e) => match e {
             EnumeratedColorspace::Cmyk | EnumeratedColorspace::Ycck => ColorSpace::CMYK,
             EnumeratedColorspace::Srgb => ColorSpace::RGB,
-            EnumeratedColorspace::RommRgb => ColorSpace::Icc {
-                profile: include_bytes!("../assets/ProPhoto-v2-micro.icc").to_vec(),
-                num_channels: 3,
-            },
             EnumeratedColorspace::EsRgb => ColorSpace::RGB,
             EnumeratedColorspace::Greyscale => ColorSpace::Gray,
             EnumeratedColorspace::Sycc => ColorSpace::RGB,
-            EnumeratedColorspace::CieLab(_) => ColorSpace::Icc {
-                profile: include_bytes!("../assets/LAB.icc").to_vec(),
-                num_channels: 3,
-            },
             _ => bail!(FormatError::Unsupported),
         },
-        jp2::colr::ColorSpace::Icc(icc) => {
-            if let Some(metadata) = ICCMetadata::from_data(icc) {
-                ColorSpace::Icc {
-                    profile: icc.clone(),
-                    num_channels: metadata.color_space.num_components(),
-                }
-            } else {
-                // Fall back to RGB for unparseable profiles (OpenJPEG test orb-blue10-lin-jp2).
-                ColorSpace::RGB
-            }
-        }
+        jp2::colr::ColorSpace::Icc => bail!(FormatError::Unsupported),
         jp2::colr::ColorSpace::Unknown => match num_components {
             1 => ColorSpace::Gray,
             3 => ColorSpace::RGB,

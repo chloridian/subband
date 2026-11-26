@@ -277,22 +277,3 @@ The tests replace a suite of files from SerenityOS, OpenJPEG and hayro itself. E
 | `irreversible_tiles_offset` | OpenJPEG (`p1_05.j2k`) |
 | `irreversible_offset_large` | OpenJPEG (`b1_mono.j2c`), Custom |
 | `reversible_lossy_layers` | OpenJPEG (`Bretagne1_0.j2k`), OpenJPEG (`Bretagne1_1.j2k`), OpenJPEG (`Bretagne1_2.j2k`) |
-
-### `integration`
-
-| Test | Provenance |
-|---|---|
-| `gray_alpha` | SerenityOS (`kakadu-lossless-gray-alpha-u8-prog1-layers1-res6.jp2`), OpenJPEG (`basn4a08.jp2`), OpenJPEG (`Marrin.jp2`), OpenJPEG (`p1_07.j2k`) |
-| `scaled_12bit` | OpenJPEG (`file6.jp2`), OpenJPEG (`issue142.j2k`) |
-| `scaled_mixed` | OpenJPEG (`issue458.jp2`), OpenJPEG (`issue979.j2k`) |
-| `cmyk` | SerenityOS (`kakadu-lossless-cmyk-u8-prog1-layers1-res6.jp2`), SerenityOS (`cmyk-small.jpf`), OpenJPEG (`issue205.jp2`) |
-| `cmyk_alpha` | SerenityOS (`kakadu-lossless-cmyka-u8-prog1-layers1-res6.jp2`) |
-| `icc_rgb` | OpenJPEG (`relax.jp2`), OpenJPEG (`issue171.jp2`), OpenJPEG (`file5.jp2`) |
-| `icc_method_3_ignored` | OpenJPEG (`text_GBR.jp2`), OpenJPEG (`issue208.jp2`) |
-| `cmyk_method_3_ignored` | OpenJPEG (`issue208.jp2`) |
-| `colr_romm_rgb` | OpenJPEG (`file5_no_icc.jp2`) |
-| `icc_gray` | OpenJPEG (`file8.jp2`), SerenityOS (`buggie-gray.jpf`) |
-| `colr_cielab` | SerenityOS (`kakadu-lossless-lab-u8-prog1-layers1-res6.jp2`), OpenJPEG (`issue559-eci-091-CIELab.jp2`) |
-| `colr_cielab_alpha` | SerenityOS (`kakadu-lossless-lab-alpha-u8-prog1-layers1-res6.jp2`) |
-| `colr_cielab_16bit` | OpenJPEG (`issue559-eci-090-CIELab.jp2`) |
-| `icc_invalid` | OpenJPEG (`orb-blue10-lin-jp2.jp2`), OpenJPEG (`orb-blue10-win-jp2.jp2`) |

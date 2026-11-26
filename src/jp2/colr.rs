@@ -1,5 +1,3 @@
-use alloc::vec::Vec;
-
 use crate::error::{FormatError, Result};
 use crate::jp2::ImageBoxes;
 use crate::reader::BitReader;
@@ -23,10 +21,7 @@ pub(crate) fn parse(boxes: &mut ImageBoxes, data: &[u8]) -> Result<()> {
                     .ok_or(FormatError::InvalidBox)?,
             )
         }
-        2 => {
-            let profile_data = reader.tail().ok_or(FormatError::InvalidBox)?.to_vec();
-            ColorSpace::Icc(profile_data)
-        }
+        2 => ColorSpace::Icc,
         _ => ColorSpace::Unknown,
     };
 
@@ -45,7 +40,7 @@ pub(crate) struct ColorSpecificationBox {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ColorSpace {
     Enumerated(EnumeratedColorspace),
-    Icc(Vec<u8>),
+    Icc,
     Unknown,
 }
 
