@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use core::result::Result as CoreResult;
+use core::result;
 use std::vec;
 use std::vec::Vec;
 
@@ -112,25 +112,31 @@ impl DecodedImage<'_> {
         self.decoded_components
     }
 
-    pub fn data_u8(&self) -> CoreResult<Vec<u8>, Cancelled> {
+    pub fn data_u8(&self) -> result::Result<Vec<u8>, Cancelled> {
         let components = self.components();
-        let buffer_size = components[0].samples().len() * components.len();
+        let buffer_size = components.first().map_or(0, |c| c.samples().len()) * components.len();
         let mut buf = vec![0; buffer_size];
         self.store_u8_into(&mut buf)?;
 
         Ok(buf)
     }
 
-    pub fn store_u8_into(&self, buf: &mut [u8]) -> CoreResult<(), Cancelled> {
+    pub fn store_u8_into(&self, buf: &mut [u8]) -> result::Result<(), Cancelled> {
         interleave_and_convert(self, buf)
     }
 }
 
-fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) -> CoreResult<(), Cancelled> {
+fn interleave_and_convert(
+    image: &DecodedImage<'_>,
+    buf: &mut [u8],
+) -> result::Result<(), Cancelled> {
     let cancel = image.cancel;
     let components = &*image.decoded_components;
+    let Some(first) = components.first() else {
+        return Ok(());
+    };
     let num_components = components.len();
-    let max_len = components[0]
+    let max_len = first
         .container
         .truncated()
         .len()
@@ -141,13 +147,41 @@ fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) -> CoreResul
         cancel.check()?;
 
         let end = (start + CHUNK).min(max_len);
-        let plane = |c: usize| &components[c].container[start..end];
-        let out = &mut buf[start * num_components..end * num_components];
-        match num_components {
-            1 => interleave_to_u8([plane(0)], out),
-            2 => interleave_to_u8([plane(0), plane(1)], out),
-            3 => interleave_to_u8([plane(0), plane(1), plane(2)], out),
-            4 => interleave_to_u8([plane(0), plane(1), plane(2), plane(3)], out),
+        let Some(out) = buf.get_mut(start * num_components..end * num_components) else {
+            break;
+        };
+        match components.as_slice() {
+            [c0] => {
+                if let Some(p0) = c0.container.get(start..end) {
+                    interleave_to_u8([p0], out);
+                }
+            }
+            [c0, c1] => {
+                if let (Some(p0), Some(p1)) =
+                    (c0.container.get(start..end), c1.container.get(start..end))
+                {
+                    interleave_to_u8([p0, p1], out);
+                }
+            }
+            [c0, c1, c2] => {
+                if let (Some(p0), Some(p1), Some(p2)) = (
+                    c0.container.get(start..end),
+                    c1.container.get(start..end),
+                    c2.container.get(start..end),
+                ) {
+                    interleave_to_u8([p0, p1, p2], out);
+                }
+            }
+            [c0, c1, c2, c3] => {
+                if let (Some(p0), Some(p1), Some(p2), Some(p3)) = (
+                    c0.container.get(start..end),
+                    c1.container.get(start..end),
+                    c2.container.get(start..end),
+                    c3.container.get(start..end),
+                ) {
+                    interleave_to_u8([p0, p1, p2, p3], out);
+                }
+            }
             _ => unreachable!(),
         }
         start = end;
@@ -167,8 +201,18 @@ fn interleave_to_u8_impl<S: Simd, const N: usize>(simd: S, planes: [&[f32]; N], 
         .map(|plane| plane.len())
         .fold(out.len() / N, usize::min);
     let blocks = pixels / 16 * 16;
-    let (out, tail) = out[..pixels * N].split_at_mut(blocks * N);
-    let plane = |c: usize| planes[c][..blocks].as_chunks::<16>().0;
+    let Some(out) = out.get_mut(..pixels * N) else {
+        return;
+    };
+    let (out, tail) = out.split_at_mut(blocks * N);
+    let plane = |c: usize| {
+        planes
+            .get(c)
+            .and_then(|p| p.get(..blocks))
+            .unwrap_or(&[])
+            .as_chunks::<16>()
+            .0
+    };
 
     match N {
         1 => {
@@ -217,7 +261,9 @@ fn interleave_to_u8_impl<S: Simd, const N: usize>(simd: S, planes: [&[f32]; N], 
 
     for (i, pixel) in tail.as_chunks_mut::<N>().0.iter_mut().enumerate() {
         for (value, plane) in pixel.iter_mut().zip(planes) {
-            *value = math::round_to_u8(plane[blocks + i]);
+            if let Some(&sample) = plane.get(blocks + i) {
+                *value = math::round_to_u8(sample);
+            }
         }
     }
 }
