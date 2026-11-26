@@ -76,7 +76,7 @@ impl<'a> ArithmeticDecoder<'a> {
     }
 
     #[inline(always)]
-    #[allow(unused, reason = "for reference")]
+    #[expect(unused, reason = "for reference")]
     fn exchange_lps(&mut self, context: &mut ArithmeticDecoderContext, qe_entry: &QeData) -> u32 {
         let cond = (self.a < qe_entry.qe) as u32;
         let inv_cond = 1 - cond;
@@ -92,7 +92,7 @@ impl<'a> ArithmeticDecoder<'a> {
     }
 
     #[inline(always)]
-    #[allow(unused, reason = "for reference")]
+    #[expect(unused, reason = "for reference")]
     fn exchange_mps(&mut self, context: &mut ArithmeticDecoderContext, qe_entry: &QeData) -> u32 {
         let cond = (self.a < qe_entry.qe) as u32;
         let inv_cond = 1 - cond;

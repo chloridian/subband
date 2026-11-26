@@ -10,7 +10,7 @@ mod roi;
 mod tile_parts;
 mod wavelet;
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::PathBuf;
 use subband::{DecodeSettings, DecoderContext, Image};
@@ -113,7 +113,7 @@ struct Decoded {
 
 fn read_stream(stream: &str) -> Vec<u8> {
     let path = stream_path(stream);
-    std::fs::read(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+    fs::read(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
 fn decode(stream: &str, settings: &DecodeSettings) -> Result<Decoded, String> {

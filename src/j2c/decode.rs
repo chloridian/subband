@@ -12,7 +12,7 @@ use super::{ComponentData, bitplane, build, idwt, mct, segment, tile};
 use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result, bail};
 use crate::j2c::segment::MAX_BITPLANE_COUNT;
-use crate::math::SimdBuffer;
+use crate::math::{self, SimdBuffer};
 use crate::reader::BitReader;
 use core::ops::Range;
 
@@ -297,7 +297,7 @@ fn decode_sub_band_bitplanes(
                 8 + log_gain
             };
 
-            crate::math::pow2i(r_b - exponent as i32) * (1.0 + (mantissa as f32) / 2048.0)
+            math::pow2i(r_b - exponent as i32) * (1.0 + (mantissa as f32) / 2048.0)
         }
     };
 

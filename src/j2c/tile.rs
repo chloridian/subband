@@ -255,7 +255,7 @@ fn parse_tile_part<'a>(
                 tile.component_infos
                     .get_mut(component_index as usize)
                     .ok_or(DecodeError::Malformed)?
-                    .quantization_info = qcc.clone();
+                    .quantization_info = qcc;
             }
             markers::PPT => {
                 if !main_header.ppm_packets.is_empty() {

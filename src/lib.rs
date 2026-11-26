@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use core::result::Result as CoreResult;
 use std::vec;
 use std::vec::Vec;
 
@@ -111,7 +112,7 @@ impl DecodedImage<'_> {
         self.decoded_components
     }
 
-    pub fn data_u8(&self) -> core::result::Result<Vec<u8>, Cancelled> {
+    pub fn data_u8(&self) -> CoreResult<Vec<u8>, Cancelled> {
         let components = self.components();
         let buffer_size = components[0].samples().len() * components.len();
         let mut buf = vec![0; buffer_size];
@@ -120,15 +121,12 @@ impl DecodedImage<'_> {
         Ok(buf)
     }
 
-    pub fn store_u8_into(&self, buf: &mut [u8]) -> core::result::Result<(), Cancelled> {
+    pub fn store_u8_into(&self, buf: &mut [u8]) -> CoreResult<(), Cancelled> {
         interleave_and_convert(self, buf)
     }
 }
 
-fn interleave_and_convert(
-    image: &DecodedImage<'_>,
-    buf: &mut [u8],
-) -> core::result::Result<(), Cancelled> {
+fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) -> CoreResult<(), Cancelled> {
     let cancel = image.cancel;
     let components = &*image.decoded_components;
     let num_components = components.len();

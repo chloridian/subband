@@ -121,7 +121,7 @@ fn parse_packet<'a>(
                     [progression_data.layer_num as usize];
 
                 if let Some(segments) = layer.segments.clone() {
-                    let segments = &mut storage.segments[segments.clone()];
+                    let segments = &mut storage.segments[segments];
 
                     for segment in segments {
                         segment.data = body_reader.read_bytes(segment.data_length as usize)?;

@@ -198,7 +198,7 @@ pub(crate) fn read_header<'a>(
 
     let header = Header {
         size_data,
-        global_coding_style: cod.clone(),
+        global_coding_style: cod,
         component_infos,
         ppm_packets,
         progression_changes,
@@ -870,7 +870,7 @@ fn quantization_parameters(
     })
 }
 
-#[allow(
+#[expect(
     unused,
     reason = "Not all marker codes are used in every decoding path yet"
 )]

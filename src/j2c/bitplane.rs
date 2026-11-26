@@ -50,7 +50,7 @@ fn decode_inner(
 
     for layer in &storage.layers[code_block.layers.start..code_block.layers.end] {
         if let Some(range) = layer.segments.clone() {
-            let layer_segments = &storage.segments[range.clone()];
+            let layer_segments = &storage.segments[range];
             for segment in layer_segments {
                 if segment.idx != last_segment_idx {
                     assert_eq!(segment.idx, last_segment_idx + 1);
@@ -920,7 +920,7 @@ impl BitDecoder for BypassDecoder<'_> {
     fn read_bit(&mut self, _: &mut ArithmeticDecoderContext) -> Option<u32> {
         self.0
             .read_bits_with_stuffing(1)
-            .or({ if !self.1 { Some(1) } else { None } })
+            .or(if !self.1 { Some(1) } else { None })
     }
 }
 

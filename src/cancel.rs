@@ -1,4 +1,6 @@
 use crate::error::{Cancelled, Result};
+use core::fmt;
+use core::result::Result as CoreResult;
 use std::sync::Arc;
 use std::vec::Vec;
 
@@ -26,8 +28,8 @@ impl CancelHandle {
     }
 }
 
-impl core::fmt::Debug for CancelHandle {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Debug for CancelHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CancelHandle").finish_non_exhaustive()
     }
 }
@@ -44,7 +46,7 @@ impl Cancel<'_> {
     }
 
     #[inline(always)]
-    pub(crate) fn check(self) -> core::result::Result<(), Cancelled> {
+    pub(crate) fn check(self) -> CoreResult<(), Cancelled> {
         if self.is_cancelled() {
             Err(Cancelled)
         } else {

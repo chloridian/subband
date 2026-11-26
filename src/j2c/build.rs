@@ -74,7 +74,7 @@ fn build_decompositions(
             storage.sub_bands.push(SubBand {
                 sub_band_type,
                 rect: sub_band_rect,
-                precincts: precincts.clone(),
+                precincts,
                 coefficients,
             });
 

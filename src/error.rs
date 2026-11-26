@@ -1,4 +1,6 @@
+use core::error::Error;
 use core::fmt;
+use core::result::Result as CoreResult;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
@@ -28,8 +30,8 @@ impl fmt::Display for Cancelled {
     }
 }
 
-impl core::error::Error for DecodeError {}
-impl core::error::Error for Cancelled {}
+impl Error for DecodeError {}
+impl Error for Cancelled {}
 
 impl From<Cancelled> for DecodeError {
     fn from(_: Cancelled) -> Self {
@@ -37,7 +39,7 @@ impl From<Cancelled> for DecodeError {
     }
 }
 
-pub type Result<T> = core::result::Result<T, DecodeError>;
+pub type Result<T> = CoreResult<T, DecodeError>;
 
 macro_rules! bail {
     ($err:expr) => {

@@ -2,7 +2,7 @@ use std::vec::Vec;
 
 use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result, bail};
-use crate::j2c::ComponentData;
+use crate::j2c::{self, ComponentData};
 use crate::jp2::r#box::{FILE_TYPE, JP2_SIGNATURE};
 use crate::reader::BitReader;
 use crate::{DecodeSettings, Image};
@@ -57,7 +57,7 @@ pub(crate) fn parse<'a>(data: &'a [u8], settings: DecodeSettings) -> Result<Imag
                 bail!(DecodeError::Unsupported);
             }
             r#box::CONTIGUOUS_CODESTREAM => {
-                parsed_codestream = Some(crate::j2c::parse_raw(current_box.data, &settings)?);
+                parsed_codestream = Some(j2c::parse_raw(current_box.data, &settings)?);
             }
             _ => {}
         }

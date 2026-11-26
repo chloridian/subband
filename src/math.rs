@@ -1,3 +1,4 @@
+use core::ops::{Deref, DerefMut};
 use std::vec;
 use std::vec::Vec;
 
@@ -12,7 +13,6 @@ mod inner {
     pub(crate) use fearless_simd::{Level, Simd, dispatch};
 
     #[derive(Copy, Clone)]
-    #[allow(non_camel_case_types)]
     #[repr(C, align(32))]
     pub(crate) struct f32x8<S: Simd> {
         inner: fearless_simd::f32x8<S>,
@@ -228,6 +228,7 @@ mod inner {
 #[cfg(not(feature = "simd"))]
 mod inner {
     use super::SIMD_WIDTH;
+    use core::array;
     use core::marker::PhantomData;
     use core::ops::{Add, AddAssign, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
@@ -246,7 +247,6 @@ mod inner {
     }
 
     #[derive(Copy, Clone)]
-    #[allow(non_camel_case_types)]
     #[repr(C, align(32))]
     pub(crate) struct f32x8<S: Simd> {
         val: [f32; SIMD_WIDTH],
@@ -274,8 +274,7 @@ mod inner {
 
         #[inline(always)]
         pub(crate) fn mul_add(self, mul: Self, addend: Self) -> Self {
-            let result =
-                core::array::from_fn(|i| super::mul_add(self.val[i], mul.val[i], addend.val[i]));
+            let result = array::from_fn(|i| super::mul_add(self.val[i], mul.val[i], addend.val[i]));
             Self {
                 val: result,
                 _marker: PhantomData,
@@ -284,7 +283,7 @@ mod inner {
 
         #[inline(always)]
         pub(crate) fn floor(self) -> Self {
-            let result = core::array::from_fn(|i| self.val[i].floor());
+            let result = array::from_fn(|i| self.val[i].floor());
             Self {
                 val: result,
                 _marker: PhantomData,
@@ -335,7 +334,7 @@ mod inner {
         type Output = Self;
         #[inline(always)]
         fn add(self, rhs: Self) -> Self {
-            let result = core::array::from_fn(|i| self.val[i] + rhs.val[i]);
+            let result = array::from_fn(|i| self.val[i] + rhs.val[i]);
             Self {
                 val: result,
                 _marker: PhantomData,
@@ -347,7 +346,7 @@ mod inner {
         type Output = Self;
         #[inline(always)]
         fn sub(self, rhs: Self) -> Self {
-            let result = core::array::from_fn(|i| self.val[i] - rhs.val[i]);
+            let result = array::from_fn(|i| self.val[i] - rhs.val[i]);
             Self {
                 val: result,
                 _marker: PhantomData,
@@ -359,7 +358,7 @@ mod inner {
         type Output = Self;
         #[inline(always)]
         fn mul(self, rhs: Self) -> Self {
-            let result = core::array::from_fn(|i| self.val[i] * rhs.val[i]);
+            let result = array::from_fn(|i| self.val[i] * rhs.val[i]);
             Self {
                 val: result,
                 _marker: PhantomData,
@@ -371,7 +370,7 @@ mod inner {
         type Output = Self;
         #[inline(always)]
         fn add(self, rhs: f32) -> Self {
-            let result = core::array::from_fn(|i| self.val[i] + rhs);
+            let result = array::from_fn(|i| self.val[i] + rhs);
             Self {
                 val: result,
                 _marker: PhantomData,
@@ -383,7 +382,7 @@ mod inner {
         type Output = Self;
         #[inline(always)]
         fn mul(self, rhs: f32) -> Self {
-            let result = core::array::from_fn(|i| self.val[i] * rhs);
+            let result = array::from_fn(|i| self.val[i] * rhs);
             Self {
                 val: result,
                 _marker: PhantomData,
@@ -412,8 +411,8 @@ mod inner {
     impl<S: Simd> MulAssign<f32> for f32x8<S> {
         #[inline(always)]
         fn mul_assign(&mut self, rhs: f32) {
-            for i in 0..SIMD_WIDTH {
-                self.val[i] *= rhs;
+            for val in &mut self.val {
+                *val *= rhs;
             }
         }
     }
@@ -421,8 +420,8 @@ mod inner {
     impl<S: Simd> DivAssign<f32> for f32x8<S> {
         #[inline(always)]
         fn div_assign(&mut self, rhs: f32) {
-            for i in 0..SIMD_WIDTH {
-                self.val[i] /= rhs;
+            for val in &mut self.val {
+                *val /= rhs;
             }
         }
     }
@@ -516,7 +515,7 @@ impl<const N: usize> SimdBuffer<N> {
     }
 }
 
-impl<const N: usize> core::ops::Deref for SimdBuffer<N> {
+impl<const N: usize> Deref for SimdBuffer<N> {
     type Target = [f32];
 
     #[inline]
@@ -525,7 +524,7 @@ impl<const N: usize> core::ops::Deref for SimdBuffer<N> {
     }
 }
 
-impl<const N: usize> core::ops::DerefMut for SimdBuffer<N> {
+impl<const N: usize> DerefMut for SimdBuffer<N> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.data
