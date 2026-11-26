@@ -1,9 +1,10 @@
 use std::vec;
 use std::vec::Vec;
 
-use super::build::{Decomposition, SubBand};
-use super::codestream::WaveletTransform;
-use super::decode::DecompositionStorage;
+use super::bitplane::{BitPlaneDecodeBuffers, BitPlaneDecodeContext};
+use super::build::Decomposition;
+use super::codestream::{ComponentInfo, WaveletTransform};
+use super::decode::{DecompositionStorage, decode_sub_band_strip};
 use super::rect::IntRect;
 use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result};
@@ -15,6 +16,8 @@ pub(crate) struct IdwtScratch {
     pub(crate) buffer: Vec<f32>,
     pub(crate) low_row: Vec<f32>,
     pub(crate) high_row: Vec<f32>,
+    pub(crate) strip_a: Vec<f32>,
+    pub(crate) strip_b: Vec<f32>,
 }
 
 pub(crate) struct IDWTOutput {
@@ -36,12 +39,15 @@ struct IDWTTempOutput {
 }
 
 pub(crate) fn apply(
+    codestream: &[u8],
     storage: &DecompositionStorage,
     scratch: &mut IdwtScratch,
+    bit_plane_ctx: &mut BitPlaneDecodeContext,
+    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
     output: &mut Vec<f32>,
     component_idx: usize,
+    component_info: &ComponentInfo,
     header: &Header,
-    transform: WaveletTransform,
     cancel: Cancel<'_>,
 ) -> Result<IntRect> {
     let tile_decompositions = storage
@@ -62,25 +68,26 @@ pub(crate) fn apply(
         .get(tile_decompositions.first_ll_sub_band)
         .ok_or(DecodeError::Malformed)?;
 
-    let (scratch_buf, low_row, high_row) = (
-        &mut scratch.buffer,
-        &mut scratch.low_row,
-        &mut scratch.high_row,
-    );
+    let Some((first, rest)) = decompositions.split_first() else {
+        decode_sub_band_strip(
+            codestream,
+            tile_decompositions.first_ll_sub_band,
+            0,
+            component_info,
+            bit_plane_ctx,
+            bit_plane_buffers,
+            storage,
+            header,
+            ll_sub_band.rect.y0,
+            ll_sub_band.rect.y1,
+            output,
+            cancel,
+        )?;
+        return Ok(ll_sub_band.rect);
+    };
 
     let buffer_size = |decomposition: &Decomposition| {
         decomposition.rect.width() as usize * decomposition.rect.height() as usize
-    };
-
-    let Some((first, rest)) = decompositions.split_first() else {
-        output.clear();
-        let ll_coeffs = storage
-            .coefficients
-            .get(ll_sub_band.coefficients.clone())
-            .ok_or(DecodeError::Malformed)?;
-        output.extend_from_slice(ll_coeffs);
-
-        return Ok(ll_sub_band.rect);
     };
 
     let last = decompositions.last().ok_or(DecodeError::Malformed)?;
@@ -96,58 +103,122 @@ pub(crate) fn apply(
         .and_then(|i| decompositions.get(i))
     {
         let prev_size = buffer_size(prev);
-        if scratch_buf.capacity() < prev_size {
-            scratch_buf.clear();
-            scratch_buf.reserve_exact(prev_size);
+        if scratch.buffer.capacity() < prev_size {
+            scratch.buffer.clear();
+            scratch.buffer.reserve_exact(prev_size);
         }
     }
 
     let max_half_width = (last.rect.width() as usize).div_ceil(2) + 2;
-    if low_row.capacity() < max_half_width {
-        low_row.clear();
-        low_row.reserve_exact(max_half_width);
+    if scratch.low_row.capacity() < max_half_width {
+        scratch.low_row.clear();
+        scratch.low_row.reserve_exact(max_half_width);
     }
-    if high_row.capacity() < max_half_width {
-        high_row.clear();
-        high_row.reserve_exact(max_half_width);
+    if scratch.high_row.capacity() < max_half_width {
+        scratch.high_row.clear();
+        scratch.high_row.reserve_exact(max_half_width);
     }
 
-    let mut use_scratch = decompositions.len().is_multiple_of(2);
+    let mut max_strip_a = 0_usize;
+    let mut max_strip_b =
+        usize::try_from(ll_sub_band.rect.area()).map_err(|_| DecodeError::TooLarge)?;
+    for decomposition in decompositions {
+        let [hl_idx, lh_idx, hh_idx] = decomposition.sub_bands;
+        let strip_len = |idx: usize| -> Result<usize> {
+            let sb = storage.sub_bands.get(idx).ok_or(DecodeError::Malformed)?;
+            let h = sb.rect.height().min(sb.cb_height) as usize;
+            (sb.rect.width() as usize)
+                .checked_mul(h)
+                .ok_or(DecodeError::TooLarge)
+        };
+        max_strip_a = max_strip_a.max(strip_len(hl_idx)?).max(strip_len(lh_idx)?);
+        max_strip_b = max_strip_b.max(strip_len(hh_idx)?);
+    }
+    if scratch.strip_a.capacity() < max_strip_a {
+        scratch.strip_a.clear();
+        scratch.strip_a.reserve_exact(max_strip_a);
+    }
+    if scratch.strip_b.capacity() < max_strip_b {
+        scratch.strip_b.clear();
+        scratch.strip_b.reserve_exact(max_strip_b);
+    }
 
-    let mut temp_output = filter_2d(
-        IDWTInput::from_sub_band(ll_sub_band, storage)?,
-        if use_scratch { scratch_buf } else { output },
-        low_row,
-        high_row,
-        first,
-        transform,
+    decode_sub_band_strip(
+        codestream,
+        tile_decompositions.first_ll_sub_band,
+        0,
+        component_info,
+        bit_plane_ctx,
+        bit_plane_buffers,
         storage,
+        header,
+        ll_sub_band.rect.y0,
+        ll_sub_band.rect.y1,
+        &mut scratch.strip_b,
         cancel,
     )?;
 
-    for decomposition in rest {
+    let mut use_scratch = decompositions.len().is_multiple_of(2);
+
+    let mut temp_output = filter_2d_first(
+        codestream,
+        if use_scratch {
+            &mut scratch.buffer
+        } else {
+            output
+        },
+        &mut scratch.low_row,
+        &mut scratch.high_row,
+        &mut scratch.strip_a,
+        &mut scratch.strip_b,
+        bit_plane_ctx,
+        bit_plane_buffers,
+        first,
+        1,
+        component_info,
+        storage,
+        header,
+        cancel,
+    )?;
+
+    for (idx, decomposition) in rest.iter().enumerate() {
+        let resolution = (idx + 2) as u8;
         use_scratch = !use_scratch;
 
         temp_output = if use_scratch {
             filter_2d(
-                IDWTInput::from_output(output),
-                scratch_buf,
-                low_row,
-                high_row,
+                codestream,
+                output,
+                &mut scratch.buffer,
+                &mut scratch.low_row,
+                &mut scratch.high_row,
+                &mut scratch.strip_a,
+                &mut scratch.strip_b,
+                bit_plane_ctx,
+                bit_plane_buffers,
                 decomposition,
-                transform,
+                resolution,
+                component_info,
                 storage,
+                header,
                 cancel,
             )?
         } else {
             filter_2d(
-                IDWTInput::from_output(scratch_buf),
+                codestream,
+                &scratch.buffer,
                 output,
-                low_row,
-                high_row,
+                &mut scratch.low_row,
+                &mut scratch.high_row,
+                &mut scratch.strip_a,
+                &mut scratch.strip_b,
+                bit_plane_ctx,
+                bit_plane_buffers,
                 decomposition,
-                transform,
+                resolution,
+                component_info,
                 storage,
+                header,
                 cancel,
             )?
         };
@@ -156,37 +227,182 @@ pub(crate) fn apply(
     Ok(temp_output.rect)
 }
 
-struct IDWTInput<'a> {
-    coefficients: &'a [f32],
-}
-
-impl<'a> IDWTInput<'a> {
-    fn from_sub_band(sub_band: &'a SubBand, storage: &'a DecompositionStorage) -> Result<Self> {
-        Ok(IDWTInput {
-            coefficients: storage
-                .coefficients
-                .get(sub_band.coefficients.clone())
-                .ok_or(DecodeError::Malformed)?,
-        })
-    }
-
-    fn from_output(coefficients: &'a [f32]) -> Self {
-        IDWTInput { coefficients }
-    }
-}
-
-fn filter_2d(
-    input: IDWTInput<'_>,
+fn filter_2d_first(
+    codestream: &[u8],
     coefficients: &mut Vec<f32>,
     low_row: &mut Vec<f32>,
     high_row: &mut Vec<f32>,
+    strip_a: &mut Vec<f32>,
+    strip_b: &mut Vec<f32>,
+    bit_plane_ctx: &mut BitPlaneDecodeContext,
+    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
     decomposition: &Decomposition,
-    transform: WaveletTransform,
+    resolution: u8,
+    component_info: &ComponentInfo,
     storage: &DecompositionStorage,
+    header: &Header,
     cancel: Cancel<'_>,
 ) -> Result<IDWTTempOutput> {
     dispatch!(Level::new(), simd => {
-        filter_2d_inner(simd, input, coefficients, low_row, high_row, decomposition, transform, storage, cancel)
+        let width = decomposition.rect.width() as usize;
+        let height = decomposition.rect.height() as usize;
+        assert!(coefficients.capacity() >= width * height);
+        cancel.resize(coefficients, width * height)?;
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        let transform = component_info.wavelet_transform();
+        let IntRect {
+            x0: u0,
+            x1: u1,
+            y0: v0,
+            ..
+        } = decomposition.rect;
+        let num_low = (u1.div_ceil(2) - u0.div_ceil(2)) as usize;
+        let num_high = (u1 / 2 - u0 / 2) as usize;
+        let (first_low_row, first_high_row) = if v0.is_multiple_of(2) { (0, 1) } else { (1, 0) };
+        let [hl_idx, lh_idx, hh_idx] = decomposition.sub_bands;
+
+        filter_low_rows_streaming(
+            simd,
+            codestream,
+            strip_b,
+            hl_idx,
+            resolution,
+            component_info,
+            bit_plane_ctx,
+            bit_plane_buffers,
+            storage,
+            header,
+            strip_a,
+            low_row,
+            high_row,
+            coefficients,
+            width,
+            first_low_row,
+            u0.is_multiple_of(2),
+            num_low,
+            num_high,
+            transform,
+            cancel,
+        )?;
+        filter_high_rows_streaming(
+            simd,
+            codestream,
+            lh_idx,
+            hh_idx,
+            resolution,
+            component_info,
+            bit_plane_ctx,
+            bit_plane_buffers,
+            storage,
+            header,
+            strip_a,
+            strip_b,
+            low_row,
+            high_row,
+            coefficients,
+            width,
+            first_high_row,
+            u0.is_multiple_of(2),
+            num_low,
+            num_high,
+            transform,
+            cancel,
+        )?;
+        filter_vertical(simd, coefficients, decomposition.rect, transform, cancel)
+    })?;
+
+    Ok(IDWTTempOutput {
+        rect: decomposition.rect,
+    })
+}
+
+fn filter_2d(
+    codestream: &[u8],
+    ll: &[f32],
+    coefficients: &mut Vec<f32>,
+    low_row: &mut Vec<f32>,
+    high_row: &mut Vec<f32>,
+    strip_a: &mut Vec<f32>,
+    strip_b: &mut Vec<f32>,
+    bit_plane_ctx: &mut BitPlaneDecodeContext,
+    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
+    decomposition: &Decomposition,
+    resolution: u8,
+    component_info: &ComponentInfo,
+    storage: &DecompositionStorage,
+    header: &Header,
+    cancel: Cancel<'_>,
+) -> Result<IDWTTempOutput> {
+    dispatch!(Level::new(), simd => {
+        let width = decomposition.rect.width() as usize;
+        let height = decomposition.rect.height() as usize;
+        assert!(coefficients.capacity() >= width * height);
+        cancel.resize(coefficients, width * height)?;
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        let transform = component_info.wavelet_transform();
+        let IntRect {
+            x0: u0,
+            x1: u1,
+            y0: v0,
+            ..
+        } = decomposition.rect;
+        let num_low = (u1.div_ceil(2) - u0.div_ceil(2)) as usize;
+        let num_high = (u1 / 2 - u0 / 2) as usize;
+        let (first_low_row, first_high_row) = if v0.is_multiple_of(2) { (0, 1) } else { (1, 0) };
+        let [hl_idx, lh_idx, hh_idx] = decomposition.sub_bands;
+
+        filter_low_rows_streaming(
+            simd,
+            codestream,
+            ll,
+            hl_idx,
+            resolution,
+            component_info,
+            bit_plane_ctx,
+            bit_plane_buffers,
+            storage,
+            header,
+            strip_a,
+            low_row,
+            high_row,
+            coefficients,
+            width,
+            first_low_row,
+            u0.is_multiple_of(2),
+            num_low,
+            num_high,
+            transform,
+            cancel,
+        )?;
+        filter_high_rows_streaming(
+            simd,
+            codestream,
+            lh_idx,
+            hh_idx,
+            resolution,
+            component_info,
+            bit_plane_ctx,
+            bit_plane_buffers,
+            storage,
+            header,
+            strip_a,
+            strip_b,
+            low_row,
+            high_row,
+            coefficients,
+            width,
+            first_high_row,
+            u0.is_multiple_of(2),
+            num_low,
+            num_high,
+            transform,
+            cancel,
+        )?;
+        filter_vertical(simd, coefficients, decomposition.rect, transform, cancel)
     })?;
 
     Ok(IDWTTempOutput {
@@ -195,107 +411,173 @@ fn filter_2d(
 }
 
 #[inline(always)]
-fn filter_2d_inner<S: Simd>(
+fn filter_low_rows_streaming<S: Simd>(
     simd: S,
-    input: IDWTInput<'_>,
-    coefficients: &mut Vec<f32>,
+    codestream: &[u8],
+    ll: &[f32],
+    hl_idx: usize,
+    resolution: u8,
+    component_info: &ComponentInfo,
+    bit_plane_ctx: &mut BitPlaneDecodeContext,
+    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
+    storage: &DecompositionStorage,
+    header: &Header,
+    hl_strip: &mut Vec<f32>,
     low_row: &mut Vec<f32>,
     high_row: &mut Vec<f32>,
-    decomposition: &Decomposition,
+    coefficients: &mut [f32],
+    width: usize,
+    first_row: usize,
+    low_first: bool,
+    num_low: usize,
+    num_high: usize,
     transform: WaveletTransform,
-    storage: &DecompositionStorage,
     cancel: Cancel<'_>,
 ) -> Result<()> {
-    let width = decomposition.rect.width() as usize;
-    let height = decomposition.rect.height() as usize;
+    let hl_sb = storage
+        .sub_bands
+        .get(hl_idx)
+        .ok_or(DecodeError::Malformed)?;
+    let y0 = hl_sb.rect.y0;
+    let y1 = hl_sb.rect.y1;
+    let cb_height = hl_sb.cb_height;
+    let mut filter =
+        HorizontalFilter::new(transform, low_first, num_low, num_high, low_row, high_row);
 
-    assert!(coefficients.capacity() >= width * height);
+    let mut abs_y = y0;
+    while abs_y < y1 {
+        let next_grid = (abs_y / cb_height + 1).saturating_mul(cb_height);
+        let abs_y_end = next_grid.min(y1);
+        let v_start = (abs_y - y0) as usize;
+        let strip_h = (abs_y_end - abs_y) as usize;
 
-    cancel.resize(coefficients, width * height)?;
+        decode_sub_band_strip(
+            codestream,
+            hl_idx,
+            resolution,
+            component_info,
+            bit_plane_ctx,
+            bit_plane_buffers,
+            storage,
+            header,
+            abs_y,
+            abs_y_end,
+            hl_strip,
+            cancel,
+        )?;
 
-    if width == 0 || height == 0 {
-        return Ok(());
+        let ll_start = v_start.checked_mul(num_low).ok_or(DecodeError::Malformed)?;
+        let ll_len = strip_h.checked_mul(num_low).ok_or(DecodeError::Malformed)?;
+        let ll_slice = ll
+            .get(ll_start..)
+            .and_then(|s| s.get(..ll_len))
+            .ok_or(DecodeError::Malformed)?;
+
+        filter.filter_rows(
+            simd,
+            ll_slice,
+            hl_strip,
+            coefficients
+                .chunks_exact_mut(width)
+                .skip(first_row + v_start * 2)
+                .step_by(2)
+                .take(strip_h),
+            cancel,
+        )?;
+
+        abs_y = abs_y_end;
     }
 
-    interleave_and_filter_horizontal(
-        simd,
-        input,
-        coefficients,
-        low_row,
-        high_row,
-        decomposition,
-        transform,
-        storage,
-        cancel,
-    )?;
-    filter_vertical(simd, coefficients, decomposition.rect, transform, cancel)
+    Ok(())
 }
 
 #[inline(always)]
-fn interleave_and_filter_horizontal<S: Simd>(
+fn filter_high_rows_streaming<S: Simd>(
     simd: S,
-    input: IDWTInput<'_>,
-    coefficients: &mut [f32],
+    codestream: &[u8],
+    lh_idx: usize,
+    hh_idx: usize,
+    resolution: u8,
+    component_info: &ComponentInfo,
+    bit_plane_ctx: &mut BitPlaneDecodeContext,
+    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
+    storage: &DecompositionStorage,
+    header: &Header,
+    lh_strip: &mut Vec<f32>,
+    hh_strip: &mut Vec<f32>,
     low_row: &mut Vec<f32>,
     high_row: &mut Vec<f32>,
-    decomposition: &Decomposition,
+    coefficients: &mut [f32],
+    width: usize,
+    first_row: usize,
+    low_first: bool,
+    num_low: usize,
+    num_high: usize,
     transform: WaveletTransform,
-    storage: &DecompositionStorage,
     cancel: Cancel<'_>,
 ) -> Result<()> {
-    let IntRect {
-        x0: u0,
-        x1: u1,
-        y0: v0,
-        ..
-    } = decomposition.rect;
-    let width = decomposition.rect.width() as usize;
+    let lh_sb = storage
+        .sub_bands
+        .get(lh_idx)
+        .ok_or(DecodeError::Malformed)?;
+    let y0 = lh_sb.rect.y0;
+    let y1 = lh_sb.rect.y1;
+    let cb_height = lh_sb.cb_height;
+    let mut filter =
+        HorizontalFilter::new(transform, low_first, num_low, num_high, low_row, high_row);
 
-    let ll = input.coefficients;
-    let [hl_idx, lh_idx, hh_idx] = decomposition.sub_bands;
-    let sub_band_coeffs = |idx: usize| -> Result<&[f32]> {
-        let sub_band = storage.sub_bands.get(idx).ok_or(DecodeError::Malformed)?;
-        storage
-            .coefficients
-            .get(sub_band.coefficients.clone())
-            .ok_or(DecodeError::Malformed)
-    };
-    let hl = sub_band_coeffs(hl_idx)?;
-    let lh = sub_band_coeffs(lh_idx)?;
-    let hh = sub_band_coeffs(hh_idx)?;
+    let mut abs_y = y0;
+    while abs_y < y1 {
+        let next_grid = (abs_y / cb_height + 1).saturating_mul(cb_height);
+        let abs_y_end = next_grid.min(y1);
+        let v_start = (abs_y - y0) as usize;
+        let strip_h = (abs_y_end - abs_y) as usize;
 
-    let num_low = (u1.div_ceil(2) - u0.div_ceil(2)) as usize;
-    let num_high = (u1 / 2 - u0 / 2) as usize;
-    let mut filter = HorizontalFilter::new(
-        transform,
-        u0.is_multiple_of(2),
-        num_low,
-        num_high,
-        low_row,
-        high_row,
-    );
+        decode_sub_band_strip(
+            codestream,
+            lh_idx,
+            resolution,
+            component_info,
+            bit_plane_ctx,
+            bit_plane_buffers,
+            storage,
+            header,
+            abs_y,
+            abs_y_end,
+            lh_strip,
+            cancel,
+        )?;
+        decode_sub_band_strip(
+            codestream,
+            hh_idx,
+            resolution,
+            component_info,
+            bit_plane_ctx,
+            bit_plane_buffers,
+            storage,
+            header,
+            abs_y,
+            abs_y_end,
+            hh_strip,
+            cancel,
+        )?;
 
-    let (first_low_row, first_high_row) = if v0.is_multiple_of(2) { (0, 1) } else { (1, 0) };
-    filter.filter_rows(
-        simd,
-        ll,
-        hl,
-        coefficients
-            .chunks_exact_mut(width)
-            .skip(first_low_row)
-            .step_by(2),
-        cancel,
-    )?;
-    filter.filter_rows(
-        simd,
-        lh,
-        hh,
-        coefficients
-            .chunks_exact_mut(width)
-            .skip(first_high_row)
-            .step_by(2),
-        cancel,
-    )
+        filter.filter_rows(
+            simd,
+            lh_strip,
+            hh_strip,
+            coefficients
+                .chunks_exact_mut(width)
+                .skip(first_row + v_start * 2)
+                .step_by(2)
+                .take(strip_h),
+            cancel,
+        )?;
+
+        abs_y = abs_y_end;
+    }
+
+    Ok(())
 }
 
 struct HorizontalFilter<'a> {

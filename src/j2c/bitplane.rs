@@ -4,7 +4,7 @@ use std::vec::Vec;
 use super::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 use super::build::{CodeBlock, SubBandType};
 use super::codestream::CodeBlockStyle;
-use super::decode::{DecompositionStorage, TileDecodeContext};
+use super::decode::DecompositionStorage;
 use crate::error::{DecodeError, Result, bail};
 use crate::reader::BitReader;
 
@@ -14,26 +14,21 @@ pub(crate) fn decode(
     sub_band_type: SubBandType,
     total_bitplanes: u8,
     style: &CodeBlockStyle,
-    tile_ctx: &mut TileDecodeContext,
+    bit_plane_ctx: &mut BitPlaneDecodeContext,
+    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
     storage: &DecompositionStorage,
     max_layers: Option<u8>,
     strict: bool,
 ) -> Result<()> {
-    tile_ctx.bit_plane_decode_context.reset(
-        code_block,
-        sub_band_type,
-        style,
-        total_bitplanes,
-        strict,
-    )?;
-    tile_ctx.bit_plane_decode_buffers.reset();
+    bit_plane_ctx.reset(code_block, sub_band_type, style, total_bitplanes, strict)?;
+    bit_plane_buffers.reset();
 
     decode_inner(
         codestream,
         code_block,
         storage,
-        &mut tile_ctx.bit_plane_decode_context,
-        &mut tile_ctx.bit_plane_decode_buffers,
+        bit_plane_ctx,
+        bit_plane_buffers,
         max_layers,
     )
     .ok_or(DecodeError::Malformed)?;

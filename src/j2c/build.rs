@@ -7,7 +7,6 @@ use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result};
 use core::iter;
 use core::ops::Range;
-use std::vec;
 
 pub(crate) fn build(
     tile: &Tile,
@@ -26,62 +25,30 @@ fn build_decompositions(
     skipped_resolution_levels: u8,
     cancel: Cancel<'_>,
 ) -> Result<()> {
-    let mut max_coefficients = 0_usize;
-
     for component_tile in tile.component_tiles(header) {
-        let decoded_resolutions = component_tile
+        component_tile
             .component_info
             .num_resolution_levels()
             .checked_sub(skipped_resolution_levels)
             .filter(|r| *r > 0)
             .ok_or(DecodeError::Malformed)?;
-        let top_resolution = ResolutionTile::new(component_tile, decoded_resolutions - 1);
-        let samples =
-            usize::try_from(top_resolution.rect.area()).map_err(|_| DecodeError::TooLarge)?;
-        max_coefficients = max_coefficients.max(samples);
-    }
-
-    if storage.coefficients.is_empty() {
-        storage.coefficients = vec![0.0; max_coefficients];
-    } else {
-        cancel.resize(&mut storage.coefficients, max_coefficients)?;
-    }
-
-    for component_tile in tile.component_tiles(header) {
-        let mut coefficient_counter = 0_usize;
-        let decoded_resolutions =
-            component_tile.component_info.num_resolution_levels() - skipped_resolution_levels;
-        let top_resolution = ResolutionTile::new(component_tile, decoded_resolutions - 1);
-        let expected_samples =
-            usize::try_from(top_resolution.rect.area()).map_err(|_| DecodeError::TooLarge)?;
         let d_start = storage.decompositions.len();
         let mut resolution_tiles = component_tile.resolution_tiles();
 
-        let mut build_sub_band = |sub_band_type: SubBandType,
-                                  resolution_tile: &ResolutionTile<'_>,
-                                  storage: &mut DecompositionStorage|
+        let build_sub_band = |sub_band_type: SubBandType,
+                              resolution_tile: &ResolutionTile<'_>,
+                              storage: &mut DecompositionStorage|
          -> Result<usize> {
             let sub_band_rect = resolution_tile.sub_band_rect(sub_band_type);
 
             let precincts = build_precincts(resolution_tile, sub_band_rect, tile, storage, cancel)?;
-
-            let added_coefficients = if resolution_tile.resolution < decoded_resolutions {
-                usize::try_from(sub_band_rect.area()).map_err(|_| DecodeError::TooLarge)?
-            } else {
-                0
-            };
-            let next_coefficient_counter = coefficient_counter
-                .checked_add(added_coefficients)
-                .ok_or(DecodeError::TooLarge)?;
-            let coefficients = coefficient_counter..next_coefficient_counter;
-            coefficient_counter = next_coefficient_counter;
 
             let idx = storage.sub_bands.len();
             storage.sub_bands.push(SubBand {
                 sub_band_type,
                 rect: sub_band_rect,
                 precincts,
-                coefficients,
+                cb_height: resolution_tile.code_block_height().max(1),
             });
 
             Ok(idx)
@@ -108,10 +75,7 @@ fn build_decompositions(
         storage.tile_decompositions.push(TileDecompositions {
             decompositions: d_start..d_end,
             first_ll_sub_band,
-            coefficient_count: coefficient_counter,
         });
-
-        assert_eq!(coefficient_counter, expected_samples);
     }
 
     Ok(())
@@ -247,7 +211,7 @@ pub(crate) struct SubBand {
     pub(crate) sub_band_type: SubBandType,
     pub(crate) rect: IntRect,
     pub(crate) precincts: Range<usize>,
-    pub(crate) coefficients: Range<usize>,
+    pub(crate) cb_height: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
