@@ -65,20 +65,6 @@ mod inner {
                 inner: self.inner.zip_high(other.inner),
             }
         }
-
-        #[inline(always)]
-        pub(crate) fn min(self, other: Self) -> Self {
-            Self {
-                inner: self.inner.min(other.inner),
-            }
-        }
-
-        #[inline(always)]
-        pub(crate) fn max(self, other: Self) -> Self {
-            Self {
-                inner: self.inner.max(other.inner),
-            }
-        }
     }
 
     impl<S: Simd> Add for f32x8<S> {
@@ -352,24 +338,6 @@ mod inner {
                 _marker: PhantomData,
             }
         }
-
-        #[inline(always)]
-        pub(crate) fn min(self, other: Self) -> Self {
-            let result = core::array::from_fn(|i| super::min_f32(self.val[i], other.val[i]));
-            Self {
-                val: result,
-                _marker: PhantomData,
-            }
-        }
-
-        #[inline(always)]
-        pub(crate) fn max(self, other: Self) -> Self {
-            let result = core::array::from_fn(|i| super::max_f32(self.val[i], other.val[i]));
-            Self {
-                val: result,
-                _marker: PhantomData,
-            }
-        }
     }
 
     impl<S: Simd> Add for f32x8<S> {
@@ -550,32 +518,6 @@ pub(crate) fn pow2i(exp: i32) -> f32 {
         (1_u32 << exp) as f32
     } else {
         1.0 / (1_u32 << -exp) as f32
-    }
-}
-
-#[inline(always)]
-#[cfg_attr(feature = "simd", allow(dead_code))]
-pub(crate) fn min_f32(a: f32, b: f32) -> f32 {
-    #[cfg(feature = "std")]
-    {
-        a.min(b)
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        if a < b { a } else { b }
-    }
-}
-
-#[inline(always)]
-#[cfg_attr(feature = "simd", allow(dead_code))]
-pub(crate) fn max_f32(a: f32, b: f32) -> f32 {
-    #[cfg(feature = "std")]
-    {
-        a.max(b)
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        if a > b { a } else { b }
     }
 }
 

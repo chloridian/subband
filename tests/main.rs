@@ -143,26 +143,6 @@ fn check_with(stream: &str, settings: DecodeSettings, expected: Reference) {
     expected.compare(stream, &actual);
 }
 
-fn check_components(stream: &str, expected: Reference) {
-    let actual = decode(stream, &DecodeSettings::default())
-        .unwrap_or_else(|e| panic!("{stream}: decoding failed: {e}"));
-    let (width, channels) = (actual.width as usize, actual.channels);
-    let samples = actual
-        .samples
-        .chunks_exact(width * channels)
-        .flat_map(|row| (0..channels).flat_map(move |c| row.iter().skip(c).step_by(channels)))
-        .copied()
-        .collect();
-
-    let side_by_side = Decoded {
-        width: actual.width * channels as u32,
-        height: actual.height,
-        channels: 1,
-        samples,
-    };
-    expected.compare(stream, &side_by_side);
-}
-
 fn check_error(stream: &str, settings: DecodeSettings, message: &str) {
     match decode(stream, &settings) {
         Ok(_) => panic!("{stream}: decoding succeeded, but should have failed"),

@@ -276,19 +276,6 @@ fn plt() {
 }
 
 #[test]
-fn components_5() {
-    check_components("codestream_components_5", reference("main_rgbar"));
-}
-
-#[test]
-fn components_5_subsampled() {
-    check_components(
-        "codestream_components_5_subsampled",
-        reference("main_rgbar_sub_1x1_1x1_1x1_2x2_2x2"),
-    );
-}
-
-#[test]
 fn crg() {
     check("codestream_crg", reference("main_rgb"));
 }

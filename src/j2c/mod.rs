@@ -60,8 +60,7 @@ pub(crate) fn parse<'a>(
         let color_space = match channels {
             1 => crate::ColorSpace::Gray,
             3 => crate::ColorSpace::RGB,
-            4 => crate::ColorSpace::CMYK,
-            num_channels => crate::ColorSpace::Unknown { num_channels },
+            _ => bail!(FormatError::Unsupported),
         };
 
         (
@@ -69,26 +68,8 @@ pub(crate) fn parse<'a>(
             header.component_infos.len() == usize::from(channels) + 1,
         )
     } else {
-        // Three components with subsampled chroma are practically always YCbCr.
-        let subsampling = |c: &codestream::ComponentInfo| {
-            (
-                c.size_info.horizontal_resolution,
-                c.size_info.vertical_resolution,
-            )
-        };
-        let has_subsampled_chroma = matches!(
-            header.component_infos.as_slice(),
-            [y, cb, cr] if {
-                let (y, cb, cr) = (subsampling(y), subsampling(cb), subsampling(cr));
-
-                cb == cr && cb != y && cb.0 >= y.0 && cb.1 >= y.1
-            }
-        );
-
         let cs = if header.component_infos.len() < 3 {
             ColorSpace::Enumerated(EnumeratedColorspace::Greyscale)
-        } else if has_subsampled_chroma {
-            ColorSpace::Enumerated(EnumeratedColorspace::Sycc)
         } else {
             ColorSpace::Enumerated(EnumeratedColorspace::Srgb)
         };

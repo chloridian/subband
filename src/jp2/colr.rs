@@ -16,10 +16,7 @@ pub(crate) fn parse(boxes: &mut ImageBoxes, data: &[u8]) -> Result<()> {
     let method = match meth {
         1 => {
             let enumerated = reader.read_u32().ok_or(FormatError::InvalidBox)?;
-            ColorSpace::Enumerated(
-                EnumeratedColorspace::from_raw(enumerated, &mut reader)
-                    .ok_or(FormatError::InvalidBox)?,
-            )
+            ColorSpace::Enumerated(EnumeratedColorspace::from_raw(enumerated))
         }
         2 => ColorSpace::Icc,
         _ => ColorSpace::Unknown,
@@ -46,81 +43,19 @@ pub(crate) enum ColorSpace {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EnumeratedColorspace {
-    BiLevel1,
-    YCbCr1,
-    YCbCr2,
-    YCbCr3,
-    PhotoYcc,
-    Cmy,
-    Cmyk,
-    Ycck,
-    CieLab(CieLab),
-    BiLevel2,
     Srgb,
     Greyscale,
-    Sycc,
-    CieJab,
     EsRgb,
-    RommRgb,
-    YPbPr112560,
-    YPbPr125050,
-    EsYcc,
-    ScRgb,
-    ScRgbGray,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CieLab {
-    pub(crate) rl: Option<u32>,
-    pub(crate) ol: Option<u32>,
-    pub(crate) ra: Option<u32>,
-    pub(crate) oa: Option<u32>,
-    pub(crate) rb: Option<u32>,
-    pub(crate) ob: Option<u32>,
+    Other,
 }
 
 impl EnumeratedColorspace {
-    fn from_raw(value: u32, reader: &mut BitReader<'_>) -> Option<Self> {
+    fn from_raw(value: u32) -> Self {
         match value {
-            0 => Some(Self::BiLevel1),
-            1 => Some(Self::YCbCr1),
-            3 => Some(Self::YCbCr2),
-            4 => Some(Self::YCbCr3),
-            9 => Some(Self::PhotoYcc),
-            11 => Some(Self::Cmy),
-            12 => Some(Self::Cmyk),
-            13 => Some(Self::Ycck),
-            14 => {
-                let rl = reader.read_u32();
-                let ol = reader.read_u32();
-                let ra = reader.read_u32();
-                let oa = reader.read_u32();
-                let rb = reader.read_u32();
-                let ob = reader.read_u32();
-                let _il = reader.read_u32();
-
-                Some(Self::CieLab(CieLab {
-                    rl,
-                    ol,
-                    ra,
-                    oa,
-                    rb,
-                    ob,
-                }))
-            }
-            15 => Some(Self::BiLevel2),
-            16 => Some(Self::Srgb),
-            17 => Some(Self::Greyscale),
-            18 => Some(Self::Sycc),
-            19 => Some(Self::CieJab),
-            20 => Some(Self::EsRgb),
-            21 => Some(Self::RommRgb),
-            22 => Some(Self::YPbPr112560),
-            23 => Some(Self::YPbPr125050),
-            24 => Some(Self::EsYcc),
-            25 => Some(Self::ScRgb),
-            26 => Some(Self::ScRgbGray),
-            _ => None,
+            16 => Self::Srgb,
+            17 => Self::Greyscale,
+            20 => Self::EsRgb,
+            _ => Self::Other,
         }
     }
 }

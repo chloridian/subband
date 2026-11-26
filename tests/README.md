@@ -64,8 +64,6 @@ The tests replace a suite of files from SerenityOS, OpenJPEG and hayro itself. E
 | `guard_bits_high` | OpenJPEG (`p0_06.j2k`) |
 | `tlm` | SerenityOS (`openjpeg-lossless-rgba-u8-TLM.jp2`), OpenJPEG (`X_4_2K_24_185_CBR_WB_000.j2k`), OpenJPEG (`X_5_2K_24_235_CBR_STEM24_000.j2k`), OpenJPEG (`X_6_2K_24_FULL_CBR_CIRCLE_000.j2k`), OpenJPEG (`_00042.j2k`) |
 | `plt` | SerenityOS (`openjpeg-lossless-rgba-u8-PLT.jp2`) |
-| `components_5` | Custom |
-| `components_5_subsampled` | Custom |
 | `crg` | OpenJPEG (`p0_15.j2k`) |
 | `reserved_marker` | OpenJPEG (`p0_02.j2k`) |
 | `tile_size_huge` | OpenJPEG (`huge-tile-size.jp2`) |
@@ -184,10 +182,8 @@ The tests replace a suite of files from SerenityOS, OpenJPEG and hayro itself. E
 |---|---|
 | `rct` | SerenityOS (`kakadu-lossless-rgb-u8-prog1-layers1-res6-mct.jp2`), OpenJPEG (`a2_colr.j2c`) |
 | `rct_four_components` | SerenityOS (`kakadu-lossless-rgba-u8-prog1-layers1-res6-mct.jp2`), SerenityOS (`kakadu-lossless-cmyk-u8-prog1-layers1-res6.jp2`) |
-| `rct_five_components` | Custom |
 | `signed_components` | OpenJPEG (`j2k32.j2k`) |
 | `one_component_ignored` | OpenJPEG (`illegalcolortransform.j2k`), OpenJPEG (`123.j2c`) |
-| `raw_ycbcr_guess` | Custom |
 | `ict` | SerenityOS (`kakadu-lossy-rgba-u8-prog0-layers1-res6-mct.jp2`), OpenJPEG (`p0_04.j2k`), OpenJPEG (`X_5_2K_24_235_CBR_STEM24_000.j2k`) |
 
 ### `errors`
@@ -227,12 +223,6 @@ The tests replace a suite of files from SerenityOS, OpenJPEG and hayro itself. E
 | `trailing_box_longer_than_file` | OpenJPEG (`issue254.jp2`) |
 | `trailing_zero_box` | OpenJPEG (`issue653-zero-unknownbox.jp2`) |
 | `duplicate_ihdr` | OpenJPEG (`issue818.jp2`) |
-| `colr_sycc_444` | OpenJPEG (`issue411-ycc444.jp2`) |
-| `colr_sycc_422` | OpenJPEG (`issue411-ycc422.jp2`), OpenJPEG (`file409752.jp2`), OpenJPEG (`issue134.jp2`), OpenJPEG (`merged.jp2`) |
-| `colr_sycc_420` | OpenJPEG (`issue411-ycc420.jp2`), OpenJPEG (`file3.jp2`), OpenJPEG (`subsampling_1.jp2`), OpenJPEG (`zoo1.jp2`) |
-| `cdef_reversed_sycc` | OpenJPEG (`file2.jp2`) |
-| `colr_first_wins` | OpenJPEG (`file5.jp2`), OpenJPEG (`file7.jp2`), SerenityOS (`buggie-gray.jpf`), OpenJPEG (`issue208.jp2`) |
-| `colr_ycck` | Custom |
 
 ### `wavelet`
 

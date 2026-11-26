@@ -84,36 +84,3 @@ fn trailing_zero_box() {
 fn duplicate_ihdr() {
     check("jp2_duplicate_ihdr", reference("main_rgb"));
 }
-
-#[test]
-fn colr_sycc_444() {
-    check("jp2_colr_sycc_444", reference("jp2_colr_sycc_444"));
-}
-
-#[test]
-fn colr_sycc_422() {
-    check("jp2_colr_sycc_422", reference("jp2_colr_sycc_422"));
-}
-
-#[test]
-fn colr_sycc_420() {
-    check("jp2_colr_sycc_420", reference("jp2_colr_sycc_420"));
-}
-
-#[test]
-fn cdef_reversed_sycc() {
-    check(
-        "jp2_cdef_reversed_sycc",
-        reference("jp2_cdef_reversed_sycc"),
-    );
-}
-
-#[test]
-fn colr_first_wins() {
-    check("jp2_colr_first_wins", reference("jp2_cdef_reversed_sycc"));
-}
-
-#[test]
-fn colr_ycck() {
-    check("jp2_colr_ycck", reference("jp2_colr_ycck"));
-}
