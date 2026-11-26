@@ -13,9 +13,9 @@ macro_rules! fixture {
 }
 
 const DISCARD_LEVELS: &[u32] = &[0, 1, 2, 5];
-const PREFIXES: &[usize] = &[600, 2000, 8192];
+const PARTIAL_SIZES: &[usize] = &[600, 2000, 8192];
 
-const WHOLE: &[Fixture] = &[
+const FIXTURES: &[Fixture] = &[
     fixture!("plywood"),
     fixture!("terrain-grass"),
     fixture!("water-normal"),
@@ -48,13 +48,13 @@ impl fmt::Display for Fixture {
     }
 }
 
-#[divan::bench(args = WHOLE, consts = DISCARD_LEVELS)]
-fn whole<const DISCARD: u32>(bencher: Bencher<'_, '_>, fixture: &Fixture) {
+#[divan::bench(args = FIXTURES, consts = DISCARD_LEVELS)]
+fn discard<const DISCARD: u32>(bencher: Bencher<'_, '_>, fixture: &Fixture) {
     run(bencher, fixture.bytes, true, DISCARD);
 }
 
-#[divan::bench(args = LAYERED, consts = PREFIXES)]
-fn prefix<const BYTES: usize>(bencher: Bencher<'_, '_>, fixture: &Fixture) {
+#[divan::bench(args = LAYERED, consts = PARTIAL_SIZES)]
+fn partial<const BYTES: usize>(bencher: Bencher<'_, '_>, fixture: &Fixture) {
     let bytes = fixture.bytes;
     run(bencher, &bytes[..BYTES.min(bytes.len())], false, 2);
 }
