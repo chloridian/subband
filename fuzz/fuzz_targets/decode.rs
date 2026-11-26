@@ -3,9 +3,9 @@
 use libfuzzer_sys::fuzz_target;
 use subband::{DecodeSettings, DecoderContext, Image};
 
-fuzz_target!(|data: &[u8]| {
+fn run(data: &[u8], strict: bool) {
     let settings = DecodeSettings {
-        strict: true,
+        strict,
         target_resolution: Some((512, 512)),
         ..DecodeSettings::default()
     };
@@ -19,4 +19,14 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(decoded) = image.decode(&mut ctx) {
         let _ = decoded.data_u8();
     }
+}
+
+fuzz_target!(|data: &[u8]| {
+    run(data, true);
+    run(data, false);
+    let Some(&[low, high]) = data.last_chunk::<2>() else {
+        return;
+    };
+    let cut = usize::from(u16::from_le_bytes([low, high])) % data.len();
+    run(&data[..cut], false);
 });
