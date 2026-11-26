@@ -12,7 +12,7 @@ use super::{ComponentData, bitplane, build, idwt, mct, segment, tile};
 use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result, bail};
 use crate::j2c::segment::MAX_BITPLANE_COUNT;
-use crate::math::SimdBuffer;
+use crate::math::{self, SimdBuffer};
 use crate::reader::BitReader;
 use core::ops::Range;
 
@@ -47,7 +47,6 @@ pub(crate) fn decode<'a>(
         )?;
     }
 
-    // Assumes either all tiles or none use MCT.
     if tiles[0].mct {
         mct::apply_inverse(
             &mut ctx.channel_data,
@@ -62,7 +61,6 @@ pub(crate) fn decode<'a>(
     Ok(())
 }
 
-/// A decoder context for decoding JPEG2000 images.
 #[derive(Default)]
 pub struct DecoderContext<'a> {
     tile_decode_context: TileDecodeContext,
@@ -84,7 +82,6 @@ impl DecoderContext<'_> {
         let sample_count = (header.size_data.image_width() as usize)
             .checked_mul(header.size_data.image_height() as usize)
             .ok_or(DecodeError::TooLarge)?;
-        // TODO: SIMD Buffers should be reused across runs!
         for _ in &initial_tile.component_infos {
             cancel.check()?;
 
@@ -127,7 +124,6 @@ fn decode_tile<'a, 'b>(
             component_info.wavelet_transform(),
             cancel,
         )?;
-        // MCT is deferred until all tiles are stored so IDWT buffers can be reused per component.
         store(
             tile,
             header,
@@ -301,7 +297,7 @@ fn decode_sub_band_bitplanes(
                 8 + log_gain
             };
 
-            crate::math::pow2i(r_b - exponent as i32) * (1.0 + (mantissa as f32) / 2048.0)
+            math::pow2i(r_b - exponent as i32) * (1.0 + (mantissa as f32) / 2048.0)
         }
     };
 

@@ -1,10 +1,10 @@
 use crate::error::{Cancelled, Result};
+use core::fmt;
+use core::result::Result as CoreResult;
 use std::sync::Arc;
 use std::vec::Vec;
 
-/// A check for cancelling decoding.
 pub trait CancelCheck: Send + Sync {
-    /// Returns whether decoding should be cancelled.
     fn is_cancelled(&self) -> bool;
 }
 
@@ -14,25 +14,22 @@ impl<F: Fn() -> bool + Send + Sync> CancelCheck for F {
     }
 }
 
-/// A shared [`CancelCheck`] that can be stored in the decode settings.
 #[derive(Clone)]
 pub struct CancelHandle(Arc<dyn CancelCheck>);
 
 impl CancelHandle {
-    /// Create a new handle from a check.
     pub fn new(check: impl CancelCheck + 'static) -> Self {
         Self(Arc::new(check))
     }
 
-    /// Returns whether decoding should be cancelled.
     #[inline]
     pub fn is_cancelled(&self) -> bool {
         self.0.is_cancelled()
     }
 }
 
-impl core::fmt::Debug for CancelHandle {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Debug for CancelHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CancelHandle").finish_non_exhaustive()
     }
 }
@@ -49,7 +46,7 @@ impl Cancel<'_> {
     }
 
     #[inline(always)]
-    pub(crate) fn check(self) -> core::result::Result<(), Cancelled> {
+    pub(crate) fn check(self) -> CoreResult<(), Cancelled> {
         if self.is_cancelled() {
             Err(Cancelled)
         } else {

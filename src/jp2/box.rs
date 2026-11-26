@@ -43,8 +43,6 @@ fn read_data<'a>(reader: &mut BitReader<'a>, length: usize, strict: bool) -> Opt
         return Some(data);
     }
 
-    // Some files declare a box length that exceeds the file, in which case
-    // we use the remaining data instead.
     if strict {
         return None;
     }

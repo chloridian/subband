@@ -26,14 +26,12 @@ pub(crate) struct ParsedCodestream<'a> {
     pub(crate) data: &'a [u8],
 }
 
-/// Decoded data for one JPEG2000 component.
 #[derive(Debug, Clone)]
 pub struct ComponentData {
     pub(crate) container: SimdBuffer<{ SIMD_WIDTH }>,
 }
 
 impl ComponentData {
-    /// The decoded samples of this component.
     pub fn samples(&self) -> &[f32] {
         self.container.truncated()
     }

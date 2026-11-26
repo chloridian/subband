@@ -26,7 +26,6 @@ fn build_decompositions(
     let mut component_samples = vec![];
 
     for component_tile in tile.component_tiles() {
-        // Tile-part headers can lower the resolution levels below the skipped count.
         let decoded_resolutions = component_tile
             .component_info
             .num_resolution_levels()
@@ -40,7 +39,6 @@ fn build_decompositions(
     let max_coefficients = component_samples.iter().copied().max().unwrap_or(0);
 
     if storage.coefficients.is_empty() {
-        // Fast path that requests pre-zeroed memory from the OS where available.
         storage.coefficients = vec![0.0; max_coefficients];
     } else {
         cancel.resize(&mut storage.coefficients, max_coefficients)?;
@@ -76,7 +74,7 @@ fn build_decompositions(
             storage.sub_bands.push(SubBand {
                 sub_band_type,
                 rect: sub_band_rect,
-                precincts: precincts.clone(),
+                precincts,
                 coefficients,
             });
 
@@ -137,7 +135,6 @@ fn build_precincts(
 
         let code_block_area = IntRect::from_ltrb(cb_x0, cb_y0, cb_x1, cb_y1);
 
-        // Rounding would otherwise yield one code-block per axis for empty sub-bands.
         let code_blocks_x = if sub_band_rect.width() == 0 {
             0
         } else {
@@ -235,7 +232,6 @@ fn build_code_blocks(
 }
 
 pub(crate) struct Decomposition {
-    // In the order low-high, high-low and high-high.
     pub(crate) sub_bands: [usize; 3],
     pub(crate) rect: IntRect,
 }

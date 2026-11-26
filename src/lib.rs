@@ -1,42 +1,6 @@
-/*!
-Subband is a fork of [hayro-jpeg2000](https://github.com/LaurenzV/hayro), tuned for the
-textures Second Life serves: raw JPEG 2000 codestreams (`.j2c`) from untrusted sources,
-decoded at reduced resolution and cancelled when no longer needed. It also unwraps the
-JP2 container format to decode its codestream. An encoder is planned.
-
-# Example
-```rust,no_run
-use subband::{DecodeSettings, DecoderContext, Image};
-
-let data = std::fs::read("texture.j2c").unwrap();
-let settings = DecodeSettings {
-    strict: true,
-    target_resolution: Some((512, 512)),
-    ..DecodeSettings::default()
-};
-let image = Image::from_codestream(&data, &settings).unwrap();
-
-let mut ctx = DecoderContext::default();
-let decoded = image.decode(&mut ctx).unwrap();
-let pixels = decoded.data_u8().unwrap();
-```
-
-# Testing
-Before the fork, hayro-jpeg2000 was tested against more than 20,000 images taken from
-PDFs, and it passes a large part of the `OpenJPEG` test suite.
-
-# Safety
-By default, the crate has the `simd` feature enabled, which uses the
-[`fearless_simd`](https://github.com/linebender/fearless_simd) crate to accelerate
-important parts of the pipeline. If you want to eliminate any usage of unsafe
-in this crate as well as its dependencies, you can simply disable this
-feature, at the cost of slower decoding. Unsafe code is forbidden
-via a crate-level attribute.
-*/
-
 #![forbid(unsafe_code)]
-#![forbid(missing_docs)]
 
+use core::result::Result as CoreResult;
 use std::vec;
 use std::vec::Vec;
 
@@ -65,20 +29,13 @@ const DEFAULT_MAX_EDGE: u32 = 4096;
 const DEFAULT_MAX_INPUT: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_OUTPUT: usize = 64 * 1024 * 1024;
 
-/// Settings to apply during decoding.
 #[derive(Debug, Clone)]
 pub struct DecodeSettings {
-    /// Whether to reject malformed input instead of decoding it leniently.
     pub strict: bool,
-    /// A hint for the target resolution that the image should be decoded at.
     pub target_resolution: Option<(u32, u32)>,
-    /// A check for cancelling decoding.
     pub cancel: Option<CancelHandle>,
-    /// Maximum allowed image edge in pixels.
     pub max_edge: u32,
-    /// Maximum allowed input size in bytes.
     pub max_input: usize,
-    /// Maximum allowed decoded output size in bytes.
     pub max_output: usize,
 }
 
@@ -95,7 +52,6 @@ impl Default for DecodeSettings {
     }
 }
 
-/// A JPEG2000 image or codestream.
 pub struct Image<'a> {
     pub(crate) codestream: &'a [u8],
     pub(crate) header: Header,
@@ -103,7 +59,6 @@ pub struct Image<'a> {
 }
 
 impl<'a> Image<'a> {
-    /// Try to create a new JPEG2000 image from the given data.
     pub fn new(data: &'a [u8], settings: &DecodeSettings) -> Result<Self> {
         if data.len() > settings.max_input {
             return Err(DecodeError::TooLarge);
@@ -118,7 +73,6 @@ impl<'a> Image<'a> {
         }
     }
 
-    /// Try to create a new image from a raw codestream.
     pub fn from_codestream(data: &'a [u8], settings: &DecodeSettings) -> Result<Self> {
         if data.len() > settings.max_input {
             return Err(DecodeError::TooLarge);
@@ -131,17 +85,14 @@ impl<'a> Image<'a> {
         }
     }
 
-    /// The width of the image.
     pub fn width(&self) -> u32 {
         self.header.size_data.image_width()
     }
 
-    /// The height of the image.
     pub fn height(&self) -> u32 {
         self.header.size_data.image_height()
     }
 
-    /// Decode the image and return its decoded components.
     pub fn decode<'b>(
         &'a self,
         decoder_context: &'b mut DecoderContext<'a>,
@@ -157,13 +108,11 @@ impl<'a> Image<'a> {
 }
 
 impl DecodedImage<'_> {
-    /// The decoded components of the image.
     pub fn components(&self) -> &[ComponentData] {
         self.decoded_components
     }
 
-    /// Return the decoded image as interleaved unsigned 8-bit sample data.
-    pub fn data_u8(&self) -> core::result::Result<Vec<u8>, Cancelled> {
+    pub fn data_u8(&self) -> CoreResult<Vec<u8>, Cancelled> {
         let components = self.components();
         let buffer_size = components[0].samples().len() * components.len();
         let mut buf = vec![0; buffer_size];
@@ -172,16 +121,12 @@ impl DecodedImage<'_> {
         Ok(buf)
     }
 
-    /// Store the decoded image as interleaved 8-bit samples into `buf`, which must fit exactly.
-    pub fn store_u8_into(&self, buf: &mut [u8]) -> core::result::Result<(), Cancelled> {
+    pub fn store_u8_into(&self, buf: &mut [u8]) -> CoreResult<(), Cancelled> {
         interleave_and_convert(self, buf)
     }
 }
 
-fn interleave_and_convert(
-    image: &DecodedImage<'_>,
-    buf: &mut [u8],
-) -> core::result::Result<(), Cancelled> {
+fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) -> CoreResult<(), Cancelled> {
     let cancel = image.cancel;
     let components = &*image.decoded_components;
     let num_components = components.len();

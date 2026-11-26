@@ -50,7 +50,7 @@ fn decode_inner(
 
     for layer in &storage.layers[code_block.layers.start..code_block.layers.end] {
         if let Some(range) = layer.segments.clone() {
-            let layer_segments = &storage.segments[range.clone()];
+            let layer_segments = &storage.segments[range];
             for segment in layer_segments {
                 if segment.idx != last_segment_idx {
                     assert_eq!(segment.idx, last_segment_idx + 1);
@@ -279,7 +279,6 @@ impl Coefficient {
 
 const COEFFICIENTS_PADDING: u32 = 1;
 
-// Direct neighbors occupy the even bits so they can be masked in one step.
 #[derive(Default, Copy, Clone)]
 struct NeighborSignificances(u8);
 
@@ -338,7 +337,6 @@ impl BitPlaneDecodeBuffers {
         self.segment_ranges.clear();
         self.segment_coding_passes.clear();
 
-        // Fenceposts: segment `i` spans entries `i..i + 1`.
         self.segment_ranges.push(0);
         self.segment_coding_passes.push(0);
     }
@@ -423,7 +421,6 @@ impl BitPlaneDecodeContext {
         self.style = *code_block_style;
         self.reset_contexts();
 
-        // Lenient on files whose missing bitplanes exceed the total (issue 399).
         self.bitplanes = if strict {
             total_bitplanes
                 .checked_sub(code_block.missing_bit_planes)
@@ -834,7 +831,6 @@ fn context_label_magnitude_refinement_coding(pos: Position, ctx: &BitPlaneDecode
 
 #[derive(Default, Copy, Clone, Debug)]
 struct Position {
-    // Offset by `COEFFICIENTS_PADDING`.
     index_x: u32,
     index_y: u32,
 }
@@ -922,14 +918,9 @@ impl BitDecoder for BypassDecoder<'_> {
     const IS_BYPASS: bool = true;
 
     fn read_bit(&mut self, _: &mut ArithmeticDecoderContext) -> Option<u32> {
-        self.0.read_bits_with_stuffing(1).or({
-            if !self.1 {
-                // Pad with ones, matching the arithmetic decoder's 0xFF padding.
-                Some(1)
-            } else {
-                None
-            }
-        })
+        self.0
+            .read_bits_with_stuffing(1)
+            .or(if !self.1 { Some(1) } else { None })
     }
 }
 
@@ -938,10 +929,6 @@ mod fast_path {
         ArithmeticDecoder, BitPlaneDecodeContext, COEFFICIENTS_PADDING, SIGN_CONTEXT_LOOKUP,
         SubBandType, ZERO_CTX_HH_LOOKUP, ZERO_CTX_HL_LOOKUP, ZERO_CTX_LL_LH_LOOKUP,
     };
-
-    // Note: Credit where credit is due, this fast path borrows some core ideas
-    // from the OpenJPEG implementation (e.g. the idea to bitpack state into u32),
-    // but has been adapted to more naturally work with our implementation.
 
     pub(super) fn handle_coding_passes(
         start: u8,
@@ -1403,7 +1390,6 @@ mod fast_path {
         }
     }
 
-    // Lane n's flags are the ones below shifted by 3n; bits 18/31: signs above/below the stripe.
     const FLAGS_PER_COEFFICIENT: u32 = 3;
     const LAST_COEFFICIENT_SHIFT: u32 = 3 * FLAGS_PER_COEFFICIENT;
 

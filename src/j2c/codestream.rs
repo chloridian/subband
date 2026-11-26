@@ -198,7 +198,7 @@ pub(crate) fn read_header<'a>(
 
     let header = Header {
         size_data,
-        global_coding_style: cod.clone(),
+        global_coding_style: cod,
         component_infos,
         ppm_packets,
         progression_changes,
@@ -304,7 +304,6 @@ impl ComponentInfo {
         let n_ll = self.coding_style.parameters.num_decomposition_levels;
 
         let sb_index = match sub_band_type {
-            // TODO: Shouldn't be reached.
             SubBandType::LowLow => u16::MAX,
             SubBandType::HighLow => 0,
             SubBandType::LowHigh => 1,
@@ -691,7 +690,6 @@ fn ppm_marker<'a>(reader: &mut BitReader<'a>) -> Option<PpmMarkerData<'a>> {
 }
 
 fn ppm_packets(mut markers: Vec<PpmMarkerData<'_>>) -> Option<Vec<PpmPacket>> {
-    // A tile-part's packet headers can continue in the next PPM segment.
     markers.sort_by_key(|m| m.sequence_idx);
     let data = markers
         .iter()
@@ -872,10 +870,6 @@ fn quantization_parameters(
     })
 }
 
-#[allow(
-    unused,
-    reason = "Not all marker codes are used in every decoding path yet"
-)]
 pub(crate) mod markers {
     pub(crate) const SOC: u8 = 0x4F;
     pub(crate) const SOT: u8 = 0x90;
@@ -892,7 +886,6 @@ pub(crate) mod markers {
     pub(crate) const POC: u8 = 0x5F;
 
     pub(crate) const TLM: u8 = 0x55;
-    pub(crate) const PLM: u8 = 0x57;
     pub(crate) const PLT: u8 = 0x58;
     pub(crate) const PPM: u8 = 0x60;
     pub(crate) const PPT: u8 = 0x61;
@@ -902,36 +895,4 @@ pub(crate) mod markers {
 
     pub(crate) const CRG: u8 = 0x63;
     pub(crate) const COM: u8 = 0x64;
-
-    pub(crate) fn to_string(marker: u8) -> &'static str {
-        match marker {
-            SOC => "SOC",
-            SOT => "SOT",
-            SOD => "SOD",
-            EOC => "EOC",
-
-            SIZ => "SIZ",
-
-            COD => "COD",
-            COC => "COC",
-            RGN => "RGN",
-            QCD => "QCD",
-            QCC => "QCC",
-            POC => "POC",
-
-            TLM => "TLM",
-            PLM => "PLM",
-            PLT => "PLT",
-            PPM => "PPM",
-            PPT => "PPT",
-
-            SOP => "SOP",
-            EPH => "EPH",
-
-            CRG => "CRG",
-            COM => "COM",
-
-            _ => "UNKNOWN",
-        }
-    }
 }

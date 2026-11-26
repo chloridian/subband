@@ -1,3 +1,5 @@
+use std::fs;
+
 use subband::{DecodeError, Image};
 
 use crate::*;
@@ -139,7 +141,7 @@ fn unsupported_component_count() {
 }
 
 fn stream(name: &str) -> Vec<u8> {
-    std::fs::read(stream_path(name)).unwrap()
+    fs::read(stream_path(name)).unwrap()
 }
 
 fn too_large(data: &[u8], settings: &DecodeSettings) {

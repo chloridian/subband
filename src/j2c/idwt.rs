@@ -51,7 +51,6 @@ pub(crate) fn apply(
         let total_height = decomposition.rect.height() as usize;
 
         let min = total_width * total_height;
-        // Sub-bands can be offset by one sample.
         let max = (total_width + 1) * (total_height + 1);
 
         (min, max)
@@ -76,7 +75,6 @@ pub(crate) fn apply(
     }
 
     if decompositions.len() > 1 {
-        // The scratch buffer never holds more than the second-to-last decomposition.
         let (s_min, s_max) = estimate_buffer_size(&decompositions[decompositions.len() - 2]);
 
         if scratch_buf.len() < s_min {
@@ -84,7 +82,6 @@ pub(crate) fn apply(
         }
     }
 
-    // Start with the buffer that makes the last decomposition land in `coefficients`.
     let mut use_scratch = decompositions.len().is_multiple_of(2);
 
     let mut temp_output = filter_2d(
@@ -177,7 +174,6 @@ fn filter_2d_inner<S: Simd>(
 
     assert!(coefficients.capacity() >= width * height);
 
-    // No clearing needed: interleaving overwrites every sample.
     cancel.resize(coefficients, width * height)?;
 
     if width == 0 || height == 0 {
@@ -361,7 +357,6 @@ impl<S: Simd> Lifting<S> for HorizontalFilter {
     }
 }
 
-// Both bands have one sample of padding on each side.
 #[inline(always)]
 fn lift_band<S: Simd>(
     simd: S,
