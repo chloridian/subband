@@ -1,5 +1,13 @@
-use crate::error::{DecodeError, Result, bail};
 use core::fmt::Debug;
+use core::result;
+
+use crate::error::{DecodeError, Result, bail};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BitReadError {
+    Eof,
+    InvalidStuffBit,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct BitReader<'a> {
@@ -120,20 +128,23 @@ impl<'a> BitReader<'a> {
     }
 
     #[inline]
-    pub(crate) fn read_bits_with_stuffing(&mut self, bit_size: u8) -> Option<u32> {
+    pub(crate) fn read_bits_with_stuffing(
+        &mut self,
+        bit_size: u8,
+    ) -> result::Result<u32, BitReadError> {
         let mut bit = 0;
 
         for _ in 0..bit_size {
             let needs_stuff_bit = self.needs_to_read_stuff_bit();
 
-            bit = (bit << 1) | self.read_bit()?;
+            bit = (bit << 1) | self.read_bit().ok_or(BitReadError::Eof)?;
 
             if needs_stuff_bit {
                 self.read_stuff_bit()?;
             }
         }
 
-        Some(bit)
+        Ok(bit)
     }
 
     pub(crate) fn needs_to_read_stuff_bit(&mut self) -> bool {
@@ -141,19 +152,19 @@ impl<'a> BitReader<'a> {
     }
 
     #[inline]
-    pub(crate) fn read_stuff_bit(&mut self) -> Option<()> {
-        let stuff_bit = self.read_bit()?;
+    pub(crate) fn read_stuff_bit(&mut self) -> result::Result<(), BitReadError> {
+        let stuff_bit = self.read_bit().ok_or(BitReadError::Eof)?;
 
         if stuff_bit != 0 {
-            return None;
+            return Err(BitReadError::InvalidStuffBit);
         }
 
-        Some(())
+        Ok(())
     }
 
     #[inline]
     pub(crate) fn peak_bits_with_stuffing(&mut self, bit_size: u8) -> Option<u32> {
-        self.clone().read_bits_with_stuffing(bit_size)
+        self.clone().read_bits_with_stuffing(bit_size).ok()
     }
 
     #[inline]

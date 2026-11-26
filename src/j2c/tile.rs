@@ -124,28 +124,24 @@ pub(crate) fn parse<'a>(
     let mut marker_budget = main_header.marker_budget;
     let mut tile_part_idx = 0;
 
-    parse_tile_part(
-        reader,
-        main_header,
-        &mut tiles,
-        tile_part_idx,
-        &mut marker_budget,
-    )?;
-    tile_part_idx += 1;
-
     while reader.peek_marker() == Some(markers::SOT) {
-        parse_tile_part(
+        if !parse_tile_part(
             reader,
             main_header,
             &mut tiles,
             tile_part_idx,
             &mut marker_budget,
-        )?;
+        )? {
+            return Ok(tiles);
+        }
         tile_part_idx += 1;
     }
 
-    if main_header.strict && reader.read_marker()? != markers::EOC {
-        bail!(DecodeError::Malformed);
+    if main_header.strict {
+        let tail = reader.tail().unwrap_or(&[]);
+        if !tail.is_empty() && tail != [0xFF] && reader.read_marker()? != markers::EOC {
+            bail!(DecodeError::Malformed);
+        }
     }
 
     Ok(tiles)
@@ -157,7 +153,11 @@ fn parse_tile_part<'a>(
     tiles: &mut [Tile<'a>],
     tile_part_idx: usize,
     marker_budget: &mut MarkerBudget,
-) -> Result<()> {
+) -> Result<bool> {
+    if reader.peek_bytes(12).is_none() {
+        return Ok(false);
+    }
+
     if reader.read_marker()? != markers::SOT {
         bail!(DecodeError::Malformed);
     }
@@ -170,16 +170,14 @@ fn parse_tile_part<'a>(
         bail!(DecodeError::Malformed);
     }
 
-    let data_len = if tile_part_header.tile_part_length == 0 {
-        reader.tail().map(|d| d.len()).unwrap_or(0)
+    let declared_len = if tile_part_header.tile_part_length == 0 {
+        None
     } else {
-        let len = (tile_part_header.tile_part_length as usize)
-            .checked_sub(12)
-            .ok_or(DecodeError::Malformed)?;
-        if main_header.strict && len > reader.tail().map(|d| d.len()).unwrap_or(0) {
-            bail!(DecodeError::Malformed);
-        }
-        len
+        Some(
+            (tile_part_header.tile_part_length as usize)
+                .checked_sub(12)
+                .ok_or(DecodeError::Malformed)?,
+        )
     };
 
     let start = reader.offset();
@@ -193,36 +191,105 @@ fn parse_tile_part<'a>(
 
     let mut ppt_headers = vec![];
     let mut coding_style_changed = false;
+    let mut saw_sod = false;
 
     loop {
-        if reader.offset() - start >= data_len {
+        if let Some(len) = declared_len
+            && reader.offset() - start >= len
+        {
+            if coding_style_changed {
+                validate_resource_limits(
+                    &main_header.size_data,
+                    &tile.component_infos,
+                    tile.num_layers,
+                )?;
+            }
+            if reader.at_end() {
+                return Ok(false);
+            }
             return if main_header.strict {
                 Err(DecodeError::Malformed)
             } else {
-                Ok(())
+                Ok(true)
             };
         }
 
+        let tail = reader.tail().unwrap_or(&[]);
+        if tail.is_empty() || tail == [0xFF] {
+            if coding_style_changed {
+                validate_resource_limits(
+                    &main_header.size_data,
+                    &tile.component_infos,
+                    tile.num_layers,
+                )?;
+            }
+            return Ok(false);
+        }
+
         let Some(marker) = reader.peek_marker() else {
+            if coding_style_changed {
+                validate_resource_limits(
+                    &main_header.size_data,
+                    &tile.component_infos,
+                    tile.num_layers,
+                )?;
+            }
             return if main_header.strict {
                 Err(DecodeError::Malformed)
             } else {
-                Ok(())
+                Ok(false)
             };
         };
 
         if marker == markers::EOC {
+            if main_header.strict {
+                bail!(DecodeError::Malformed);
+            }
             break;
+        }
+
+        if marker == markers::SOD {
+            reader.read_marker()?;
+            marker_budget.record(0)?;
+            saw_sod = true;
+            break;
+        }
+
+        if (0x30..=0x3F).contains(&marker) {
+            reader.read_marker()?;
+            marker_budget.record(0)?;
+            continue;
+        }
+
+        let Some(&[_, _, hi, lo]) = reader.peek_bytes(4).and_then(|b| b.first_chunk::<4>()) else {
+            if coding_style_changed {
+                validate_resource_limits(
+                    &main_header.size_data,
+                    &tile.component_infos,
+                    tile.num_layers,
+                )?;
+            }
+            return Ok(false);
+        };
+        let seg_len = u16::from_be_bytes([hi, lo]);
+        if seg_len < 2 {
+            bail!(DecodeError::Malformed);
+        }
+        if reader.peek_bytes(2 + usize::from(seg_len)).is_none() {
+            if coding_style_changed {
+                validate_resource_limits(
+                    &main_header.size_data,
+                    &tile.component_infos,
+                    tile.num_layers,
+                )?;
+            }
+            return Ok(false);
         }
 
         reader.read_marker()?;
         let seg_start = reader.offset();
 
         match marker {
-            markers::SOD => {
-                marker_budget.record(0)?;
-                break;
-            }
             markers::COD => {
                 let cod = codestream::cod_marker(reader)?;
 
@@ -290,7 +357,6 @@ fn parse_tile_part<'a>(
             markers::COM => {
                 skip_marker_segment(reader).ok_or(DecodeError::Malformed)?;
             }
-            (0x30..=0x3F) => {}
             _ => {
                 bail!(DecodeError::Unsupported);
             }
@@ -307,14 +373,24 @@ fn parse_tile_part<'a>(
         )?;
     }
 
-    let remaining_bytes = if let Some(len) = data_len.checked_sub(reader.offset() - start) {
-        len
-    } else {
-        return if main_header.strict {
-            Err(DecodeError::Malformed)
-        } else {
-            Ok(())
+    if !saw_sod {
+        return Ok(true);
+    }
+
+    let data = if let Some(len) = declared_len {
+        let Some(remaining_bytes) = len.checked_sub(reader.offset() - start) else {
+            return if main_header.strict {
+                Err(DecodeError::Malformed)
+            } else {
+                Ok(true)
+            };
         };
+        let avail = remaining_bytes.min(reader.tail().map_or(0, |t| t.len()));
+        reader.read_bytes(avail).ok_or(DecodeError::Malformed)?
+    } else {
+        let data = reader.tail().ok_or(DecodeError::Malformed)?;
+        reader.jump_to_end();
+        data
     };
 
     ppt_headers.sort_by_key(|p1| p1.sequence_idx);
@@ -323,16 +399,6 @@ fn parse_tile_part<'a>(
     if let Some(ppm_marker) = main_header.ppm_packets.get(tile_part_idx) {
         headers.push(BitReader::new(ppm_marker));
     }
-
-    let data = match reader.read_bytes(remaining_bytes) {
-        Some(data) => data,
-        None if !main_header.strict => {
-            let data = reader.tail().ok_or(DecodeError::Malformed)?;
-            reader.jump_to_end();
-            data
-        }
-        None => bail!(DecodeError::Malformed),
-    };
 
     let tile_part = if !headers.is_empty() {
         TilePart::Separated(SeparatedTilePart {
@@ -348,7 +414,7 @@ fn parse_tile_part<'a>(
 
     tile.tile_parts.push(tile_part);
 
-    Ok(())
+    Ok(true)
 }
 
 #[derive(Debug, Copy, Clone)]

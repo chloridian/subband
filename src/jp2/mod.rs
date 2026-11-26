@@ -13,6 +13,7 @@ const MAX_BOXES_PER_LEVEL: usize = 64;
 
 pub struct DecodedImage<'a> {
     pub(crate) decoded_components: &'a mut Vec<ComponentData>,
+    pub(crate) layers_received: &'a [u8],
     pub(crate) cancel: Cancel<'a>,
 }
 

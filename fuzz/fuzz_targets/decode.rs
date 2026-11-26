@@ -23,6 +23,7 @@ fn run(data: &[u8], strict: bool) {
     }
     let mut ctx = DecoderContext::default();
     if let Ok(decoded) = image.decode(&mut ctx) {
+        let _ = decoded.layers_received();
         let _ = decoded.data_u8();
     }
 }
@@ -30,9 +31,25 @@ fn run(data: &[u8], strict: bool) {
 fuzz_target!(|data: &[u8]| {
     run(data, true);
     run(data, false);
+
     let Some(&[low, high]) = data.last_chunk::<2>() else {
         return;
     };
     let cut = usize::from(u16::from_le_bytes([low, high])) % data.len();
-    run(&data[..cut], false);
+    if let Some(prefix) = data.get(..cut) {
+        run(prefix, true);
+        run(prefix, false);
+    }
+
+    if let Some(&[idx_lo, idx_hi, mask]) = data.last_chunk::<3>()
+        && mask != 0
+    {
+        let mut flipped = data.to_vec();
+        let idx = usize::from(u16::from_le_bytes([idx_lo, idx_hi])) % flipped.len();
+        if let Some(byte) = flipped.get_mut(idx) {
+            *byte ^= mask;
+        }
+        run(&flipped, true);
+        run(&flipped, false);
+    }
 });
