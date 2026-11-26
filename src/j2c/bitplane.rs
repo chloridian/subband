@@ -1016,6 +1016,7 @@ impl BitDecoder for BypassDecoder<'_> {
     fn read_bit(&mut self, _: &mut ArithmeticDecoderContext) -> Option<u32> {
         self.0
             .read_bits_with_stuffing(1)
+            .ok()
             .or(if !self.1 { Some(1) } else { None })
     }
 }

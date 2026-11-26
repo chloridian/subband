@@ -1,4 +1,5 @@
 use std::boxed::Box;
+use std::vec;
 use std::vec::Vec;
 
 use super::bitplane::{BitPlaneDecodeBuffers, BitPlaneDecodeContext};
@@ -31,8 +32,22 @@ pub(crate) fn decode<'a>(
 
     ctx.reset(header, first_tile, cancel)?;
 
+    let decoded_resolutions = usize::from(header.levels - header.skipped_resolution_levels) + 1;
+    ctx.layers_received.clear();
+    ctx.layers_received.resize(decoded_resolutions, u8::MAX);
+
     for tile in &tiles {
         cancel.check()?;
+
+        if tile.tile_parts.is_empty() {
+            ctx.layers_received.fill(0);
+            continue;
+        }
+
+        let num_layers = usize::from(tile.num_layers);
+        ctx.received_packets.clear();
+        ctx.received_packets
+            .resize(decoded_resolutions * num_layers, 0);
 
         let progression_iterator = progression_iterator(tile, header)?;
 
@@ -43,7 +58,17 @@ pub(crate) fn decode<'a>(
             &mut ctx.tile_decode_context,
             &mut ctx.channel_data,
             &mut ctx.storage,
+            &mut ctx.received_packets,
+            decoded_resolutions,
             cancel,
+        )?;
+
+        update_layers_received(
+            tile,
+            header,
+            decoded_resolutions,
+            &ctx.received_packets,
+            &mut ctx.layers_received,
         )?;
     }
 
@@ -61,10 +86,84 @@ pub(crate) fn decode<'a>(
     Ok(())
 }
 
+fn update_layers_received(
+    tile: &Tile<'_>,
+    header: &Header,
+    decoded_resolutions: usize,
+    received_packets: &[u64],
+    layers_received: &mut [u8],
+) -> Result<()> {
+    let num_layers = usize::from(tile.num_layers);
+    let effective_layers = usize::from(
+        header
+            .max_layers
+            .map_or(tile.num_layers, |m| m.min(tile.num_layers)),
+    );
+    let has_poc = !tile.progression_changes.is_empty() || !header.progression_changes.is_empty();
+
+    if has_poc {
+        let mut expected = vec![0_u64; decoded_resolutions * num_layers];
+        for data in progression_iterator(tile, header)? {
+            let r = usize::from(data.resolution);
+            let l = usize::from(data.layer_num);
+            if r < decoded_resolutions
+                && let Some(slot) = expected.get_mut(r * num_layers + l)
+            {
+                *slot = slot.saturating_add(1);
+            }
+        }
+        for (r, out) in layers_received.iter_mut().enumerate() {
+            let mut complete = 0_u8;
+            for l in 0..effective_layers {
+                let exp = expected.get(r * num_layers + l).copied().unwrap_or(0);
+                let rec = received_packets
+                    .get(r * num_layers + l)
+                    .copied()
+                    .unwrap_or(0);
+                if exp > 0 && rec >= exp {
+                    complete += 1;
+                } else {
+                    break;
+                }
+            }
+            *out = (*out).min(complete);
+        }
+        return Ok(());
+    }
+
+    for (r, out) in layers_received.iter_mut().enumerate() {
+        let mut expected_r = 0_u64;
+        for info in &tile.component_infos {
+            if r < usize::from(info.num_resolution_levels()) {
+                let ct = ComponentTile::new(tile, info);
+                expected_r =
+                    expected_r.saturating_add(ResolutionTile::new(ct, r as u8).num_precincts());
+            }
+        }
+        let mut complete = 0_u8;
+        for l in 0..effective_layers {
+            let rec = received_packets
+                .get(r * num_layers + l)
+                .copied()
+                .unwrap_or(0);
+            if expected_r > 0 && rec >= expected_r {
+                complete += 1;
+            } else {
+                break;
+            }
+        }
+        *out = (*out).min(complete);
+    }
+
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct DecoderContext<'a> {
     tile_decode_context: TileDecodeContext,
     pub(crate) channel_data: Vec<ComponentData>,
+    pub(crate) layers_received: Vec<u8>,
+    received_packets: Vec<u64>,
     storage: DecompositionStorage<'a>,
 }
 
@@ -101,12 +200,22 @@ fn decode_tile<'a, 'b>(
     tile_ctx: &mut TileDecodeContext,
     channel_data: &mut [ComponentData],
     storage: &mut DecompositionStorage<'a>,
+    received_packets: &mut [u64],
+    decoded_resolutions: usize,
     cancel: Cancel<'_>,
 ) -> Result<()> {
     storage.reset();
 
     build::build(tile, storage, header.skipped_resolution_levels, cancel)?;
-    segment::parse(tile, progression_iterator, header, storage, cancel)?;
+    segment::parse(
+        tile,
+        progression_iterator,
+        header,
+        storage,
+        received_packets,
+        decoded_resolutions,
+        cancel,
+    )?;
 
     for ((idx, component_info), channel) in header
         .component_infos

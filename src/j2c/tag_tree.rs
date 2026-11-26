@@ -1,6 +1,6 @@
 use std::vec::Vec;
 
-use crate::reader::BitReader;
+use crate::reader::{BitReadError, BitReader};
 
 #[derive(Debug, PartialEq, Eq, Clone, Default)]
 pub(crate) struct TagNode {
@@ -87,8 +87,10 @@ fn read_tag_node(
     parent_val: u32,
     max_val: u32,
     nodes: &mut [TagNode],
-) -> Option<u32> {
-    let node = nodes.get_mut(node_idx)?;
+) -> Result<u32, BitReadError> {
+    let node = nodes
+        .get_mut(node_idx)
+        .ok_or(BitReadError::InvalidStuffBit)?;
 
     if !node.initialized {
         let mut val = u32::max(parent_val, node.value);
@@ -112,7 +114,7 @@ fn read_tag_node(
     }
 
     if node.value >= max_val || node.level == 0 {
-        return Some(node.value);
+        return Ok(node.value);
     }
 
     let top_left_width = node.top_left_width();
@@ -185,7 +187,7 @@ impl TagTree {
         reader: &mut BitReader<'_>,
         max_val: u32,
         nodes: &mut [TagNode],
-    ) -> Option<u32> {
+    ) -> Result<u32, BitReadError> {
         debug_assert!(x < self.width && y < self.height);
 
         read_tag_node(self.root, x, y, reader, 0, max_val, nodes)

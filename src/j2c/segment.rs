@@ -1,36 +1,59 @@
+use core::result;
 use std::boxed::Box;
 
 use super::build::Segment;
-use super::codestream::markers::{EPH, SOP};
+use super::codestream::markers::{EOC, EPH, SOP};
 use super::codestream::{ComponentInfo, Header};
-use super::decode::DecompositionStorage;
+use super::decode::{DecompositionStorage, SubBandIter};
 use super::progression::ProgressionData;
 use super::tile::{Tile, TilePart};
 use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result, bail};
-use crate::reader::BitReader;
+use crate::reader::{BitReadError, BitReader};
 
 pub(crate) const MAX_BITPLANE_COUNT: u8 = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PacketError {
+    Done,
+    Truncated,
+    Malformed,
+}
+
+impl From<BitReadError> for PacketError {
+    fn from(err: BitReadError) -> Self {
+        match err {
+            BitReadError::Eof => Self::Truncated,
+            BitReadError::InvalidStuffBit => Self::Malformed,
+        }
+    }
+}
 
 pub(crate) fn parse<'a, 'b>(
     tile: &'b Tile<'a>,
     mut progression_iterator: Box<dyn Iterator<Item = ProgressionData> + '_>,
     header: &Header,
     storage: &mut DecompositionStorage<'a>,
+    received_packets: &mut [u64],
+    decoded_resolutions: usize,
     cancel: Cancel<'_>,
 ) -> Result<()> {
+    let num_layers = usize::from(tile.num_layers);
+
     for tile_part in &tile.tile_parts {
-        if parse_inner(
+        match parse_inner(
             tile_part.clone(),
             &mut progression_iterator,
             &tile.component_infos,
             storage,
+            received_packets,
+            decoded_resolutions,
+            num_layers,
             cancel,
-        )?
-        .is_none()
-            && header.strict
-        {
-            bail!(DecodeError::Malformed);
+        )? {
+            Ok(()) | Err(PacketError::Done | PacketError::Truncated) => {}
+            Err(PacketError::Malformed) if header.strict => bail!(DecodeError::Malformed),
+            Err(PacketError::Malformed) => {}
         }
     }
 
@@ -42,24 +65,34 @@ fn parse_inner<'a>(
     progression_iterator: &mut dyn Iterator<Item = ProgressionData>,
     component_infos: &[ComponentInfo],
     storage: &mut DecompositionStorage<'a>,
+    received_packets: &mut [u64],
+    decoded_resolutions: usize,
+    num_layers: usize,
     cancel: Cancel<'_>,
-) -> Result<Option<()>> {
+) -> Result<result::Result<(), PacketError>> {
     while !tile_part.header().at_end() {
         cancel.check()?;
 
-        if parse_packet(
+        match parse_packet(
             &mut tile_part,
             progression_iterator,
             component_infos,
             storage,
-        )
-        .is_none()
-        {
-            return Ok(None);
+        ) {
+            Ok(prog) => {
+                let res = usize::from(prog.resolution);
+                let layer = usize::from(prog.layer_num);
+                if res < decoded_resolutions
+                    && let Some(slot) = received_packets.get_mut(res * num_layers + layer)
+                {
+                    *slot = slot.saturating_add(1);
+                }
+            }
+            Err(err) => return Ok(Err(err)),
         }
     }
 
-    Ok(Some(()))
+    Ok(Ok(()))
 }
 
 fn parse_packet<'a>(
@@ -67,22 +100,35 @@ fn parse_packet<'a>(
     progression_iterator: &mut dyn Iterator<Item = ProgressionData>,
     component_infos: &[ComponentInfo],
     storage: &mut DecompositionStorage<'a>,
-) -> Option<()> {
-    let progression_data = progression_iterator.next()?;
+) -> result::Result<ProgressionData, PacketError> {
+    let Some(progression_data) = progression_iterator.next() else {
+        let header_reader = tile_part.header();
+        if header_reader.peek_marker() == Some(EOC) || header_reader.tail() == Some(&[0xFF]) {
+            return Err(PacketError::Done);
+        }
+        return Err(PacketError::Malformed);
+    };
     let resolution = progression_data.resolution;
-    let component_info = component_infos.get(progression_data.component as usize)?;
+    let component_info = component_infos
+        .get(progression_data.component as usize)
+        .ok_or(PacketError::Malformed)?;
     let tile_decompositions = storage
         .tile_decompositions
-        .get_mut(progression_data.component as usize)?;
+        .get_mut(progression_data.component as usize)
+        .ok_or(PacketError::Malformed)?;
     let sub_band_iter = tile_decompositions.sub_band_iter(resolution, &storage.decompositions);
 
     let body_reader = tile_part.body();
 
-    if component_info.coding_style.flags.may_use_sop_markers()
-        && body_reader.peek_marker() == Some(SOP)
-    {
-        body_reader.read_marker().ok()?;
-        body_reader.skip_bytes(4)?;
+    if component_info.coding_style.flags.may_use_sop_markers() {
+        if body_reader.peek_marker() == Some(SOP) {
+            body_reader
+                .read_marker()
+                .map_err(|_| PacketError::Truncated)?;
+            body_reader.skip_bytes(4).ok_or(PacketError::Truncated)?;
+        } else if body_reader.tail() == Some(&[0xFF]) {
+            return Err(PacketError::Truncated);
+        }
     }
 
     let header_reader = tile_part.header();
@@ -91,53 +137,163 @@ fn parse_packet<'a>(
 
     if !zero_length {
         for sub_band in sub_band_iter.clone() {
-            resolve_segments(
+            if let Err(err) = resolve_segments(
                 sub_band,
                 &progression_data,
                 header_reader,
                 storage,
                 component_info,
-            )?;
+            ) {
+                rollback_packet_header(sub_band_iter, &progression_data, storage);
+                return Err(err);
+            }
         }
     }
 
     header_reader.align();
 
-    if component_info.coding_style.flags.uses_eph_marker()
-        && header_reader.read_marker().ok()? != EPH
-    {
-        return None;
+    if component_info.coding_style.flags.uses_eph_marker() {
+        let tail = header_reader.tail().unwrap_or(&[]);
+        if tail.is_empty() || tail == [0xFF] {
+            if !zero_length {
+                rollback_packet_header(sub_band_iter, &progression_data, storage);
+            }
+            return Err(PacketError::Truncated);
+        }
+        if header_reader.read_marker().ok() != Some(EPH) {
+            if !zero_length {
+                rollback_packet_header(sub_band_iter, &progression_data, storage);
+            }
+            return Err(PacketError::Malformed);
+        }
     }
 
     let body_reader = tile_part.body();
 
     if !zero_length {
+        let layer_num = progression_data.layer_num as usize;
+        let precinct_idx = progression_data.precinct as usize;
+        let mut truncated = false;
+
         for sub_band in sub_band_iter {
-            let sub_band = storage.sub_bands.get_mut(sub_band)?;
-            let precinct = storage
-                .precincts
-                .get_mut(sub_band.precincts.clone())?
-                .get_mut(progression_data.precinct as usize)?;
-            let code_blocks = storage.code_blocks.get_mut(precinct.code_blocks.clone())?;
+            let cb_range = storage
+                .sub_bands
+                .get(sub_band)
+                .and_then(|sb| storage.precincts.get(sb.precincts.clone()))
+                .and_then(|precincts| precincts.get(precinct_idx))
+                .map(|p| p.code_blocks.clone())
+                .ok_or(PacketError::Malformed)?;
 
-            for code_block in code_blocks {
-                let layer = storage
-                    .layers
-                    .get_mut(code_block.layers.clone())?
-                    .get_mut(progression_data.layer_num as usize)?;
+            for cb_idx in cb_range {
+                if truncated {
+                    rollback_code_block(cb_idx, layer_num, storage);
+                    continue;
+                }
 
-                if let Some(segments) = layer.segments.clone() {
-                    let segments = storage.segments.get_mut(segments)?;
+                let seg_range = storage
+                    .code_blocks
+                    .get(cb_idx)
+                    .and_then(|cb| storage.layers.get(cb.layers.clone()))
+                    .and_then(|layers| layers.get(layer_num))
+                    .and_then(|layer| layer.segments.clone());
 
+                if let Some(seg_range) = seg_range {
+                    let segments = storage
+                        .segments
+                        .get_mut(seg_range)
+                        .ok_or(PacketError::Malformed)?;
+
+                    let mut complete = true;
                     for segment in segments {
-                        segment.data = body_reader.read_bytes(segment.data_length as usize)?;
+                        if let Some(bytes) = body_reader.read_bytes(segment.data_length as usize) {
+                            segment.data = bytes;
+                        } else {
+                            complete = false;
+                            break;
+                        }
+                    }
+
+                    if !complete {
+                        truncated = true;
+                        rollback_code_block(cb_idx, layer_num, storage);
                     }
                 }
             }
         }
+
+        if truncated {
+            return Err(PacketError::Truncated);
+        }
     }
 
-    Some(())
+    Ok(progression_data)
+}
+
+fn rollback_packet_header(
+    sub_band_iter: SubBandIter,
+    progression_data: &ProgressionData,
+    storage: &mut DecompositionStorage<'_>,
+) {
+    let layer_num = progression_data.layer_num as usize;
+    let precinct_idx = progression_data.precinct as usize;
+
+    for sub_band in sub_band_iter {
+        let Some(cb_range) = storage
+            .sub_bands
+            .get(sub_band)
+            .and_then(|sb| storage.precincts.get(sb.precincts.clone()))
+            .and_then(|precincts| precincts.get(precinct_idx))
+            .map(|p| p.code_blocks.clone())
+        else {
+            continue;
+        };
+
+        for cb_idx in cb_range {
+            rollback_code_block(cb_idx, layer_num, storage);
+        }
+    }
+}
+
+fn rollback_code_block(cb_idx: usize, layer_num: usize, storage: &mut DecompositionStorage<'_>) {
+    let Some(code_block) = storage.code_blocks.get_mut(cb_idx) else {
+        return;
+    };
+    let Some(seg_range) = storage
+        .layers
+        .get_mut(code_block.layers.clone())
+        .and_then(|layers| layers.get_mut(layer_num))
+        .and_then(|layer| layer.segments.take())
+    else {
+        return;
+    };
+
+    let passes: u8 = storage
+        .segments
+        .get(seg_range)
+        .map_or(0, |segs| segs.iter().map(|s| s.coding_pases).sum());
+    code_block.number_of_coding_passes = code_block.number_of_coding_passes.saturating_sub(passes);
+    if code_block.number_of_coding_passes == 0 {
+        code_block.missing_bit_planes = 0;
+    }
+}
+
+fn read_added_coding_passes(reader: &mut BitReader<'_>) -> result::Result<u8, PacketError> {
+    if reader.read_bits_with_stuffing(1)? == 0 {
+        return Ok(1);
+    }
+    if reader.read_bits_with_stuffing(1)? == 0 {
+        return Ok(2);
+    }
+    let next = reader.read_bits_with_stuffing(2)?;
+    if next < 3 {
+        return Ok(3 + next as u8);
+    }
+    let ext = reader.read_bits_with_stuffing(5)?;
+    if ext < 31 {
+        return Ok(6 + ext as u8);
+    }
+    let tail = reader.read_bits_with_stuffing(7)?;
+    Ok(37 + tail as u8)
 }
 
 fn resolve_segments(
@@ -146,13 +302,24 @@ fn resolve_segments(
     reader: &mut BitReader<'_>,
     storage: &mut DecompositionStorage<'_>,
     component_info: &ComponentInfo,
-) -> Option<()> {
+) -> result::Result<(), PacketError> {
     const MAX_CODING_PASSES: u8 = 1 + 3 * (MAX_BITPLANE_COUNT - 1);
 
-    let sub_band = storage.sub_bands.get(sub_band_dx)?;
-    let precincts = storage.precincts.get_mut(sub_band.precincts.clone())?;
-    let precinct = precincts.get_mut(progression_data.precinct as usize)?;
-    let code_blocks = storage.code_blocks.get_mut(precinct.code_blocks.clone())?;
+    let sub_band = storage
+        .sub_bands
+        .get(sub_band_dx)
+        .ok_or(PacketError::Malformed)?;
+    let precincts = storage
+        .precincts
+        .get_mut(sub_band.precincts.clone())
+        .ok_or(PacketError::Malformed)?;
+    let precinct = precincts
+        .get_mut(progression_data.precinct as usize)
+        .ok_or(PacketError::Malformed)?;
+    let code_blocks = storage
+        .code_blocks
+        .get_mut(precinct.code_blocks.clone())
+        .ok_or(PacketError::Malformed)?;
 
     for code_block in code_blocks {
         let is_included = if code_block.has_been_included {
@@ -173,8 +340,9 @@ fn resolve_segments(
 
         let layer = storage
             .layers
-            .get_mut(code_block.layers.clone())?
-            .get_mut(progression_data.layer_num as usize)?;
+            .get_mut(code_block.layers.clone())
+            .and_then(|layers| layers.get_mut(progression_data.layer_num as usize))
+            .ok_or(PacketError::Malformed)?;
 
         let included_first_time = is_included && !code_block.has_been_included;
 
@@ -190,44 +358,26 @@ fn resolve_segments(
 
         code_block.has_been_included |= is_included;
 
-        let added_coding_passes = if reader.peak_bits_with_stuffing(9) == Some(0x1ff) {
-            reader.read_bits_with_stuffing(9)?;
-            reader.read_bits_with_stuffing(7)? + 37
-        } else if reader.peak_bits_with_stuffing(4) == Some(0x0f) {
-            reader.read_bits_with_stuffing(4)?;
-            reader.read_bits_with_stuffing(5)? + 6
-        } else if reader.peak_bits_with_stuffing(4) == Some(0b1110) {
-            reader.read_bits_with_stuffing(4)?;
-            5
-        } else if reader.peak_bits_with_stuffing(4) == Some(0b1101) {
-            reader.read_bits_with_stuffing(4)?;
-            4
-        } else if reader.peak_bits_with_stuffing(4) == Some(0b1100) {
-            reader.read_bits_with_stuffing(4)?;
-            3
-        } else if reader.peak_bits_with_stuffing(2) == Some(0b10) {
-            reader.read_bits_with_stuffing(2)?;
-            2
-        } else if reader.peak_bits_with_stuffing(1) == Some(0) {
-            reader.read_bits_with_stuffing(1)?;
-            1
-        } else {
-            return None;
-        } as u8;
+        let added_coding_passes = read_added_coding_passes(reader)?;
 
-        let mut k = 0;
+        let mut k = 0_u32;
 
         while reader.read_bits_with_stuffing(1)? == 1 {
-            k += 1;
+            k = k.checked_add(1).ok_or(PacketError::Malformed)?;
         }
 
-        code_block.l_block += k;
+        code_block.l_block = code_block
+            .l_block
+            .checked_add(k)
+            .ok_or(PacketError::Malformed)?;
 
         let previous_layers_passes = code_block.number_of_coding_passes;
-        let cumulative_passes = previous_layers_passes.checked_add(added_coding_passes)?;
+        let cumulative_passes = previous_layers_passes
+            .checked_add(added_coding_passes)
+            .ok_or(PacketError::Malformed)?;
 
         if cumulative_passes > MAX_CODING_PASSES {
-            return None;
+            return Err(PacketError::Malformed);
         }
 
         let get_segment_idx = |pass_idx: u8| {
@@ -246,12 +396,16 @@ fn resolve_segments(
         let start = storage.segments.len();
 
         let mut push_segment = |segment: u8, coding_passes_for_segment: u8| {
-            let length = {
-                assert!(coding_passes_for_segment > 0);
+            assert!(coding_passes_for_segment > 0);
 
-                let length_bits = code_block.l_block + coding_passes_for_segment.ilog2();
-                reader.read_bits_with_stuffing(length_bits as u8)
-            }?;
+            let length_bits = code_block
+                .l_block
+                .checked_add(coding_passes_for_segment.ilog2())
+                .ok_or(PacketError::Malformed)?;
+            if length_bits > 32 {
+                return Err(PacketError::Malformed);
+            }
+            let length = reader.read_bits_with_stuffing(length_bits as u8)?;
 
             storage.segments.push(Segment {
                 idx: segment,
@@ -260,7 +414,7 @@ fn resolve_segments(
                 data: &[],
             });
 
-            Some(())
+            Ok(())
         };
 
         let mut last_segment = get_segment_idx(previous_layers_passes);
@@ -288,7 +442,7 @@ fn resolve_segments(
         code_block.non_empty_layer_count += 1;
     }
 
-    Some(())
+    Ok(())
 }
 
 pub(crate) fn segment_idx_for_bypass(pass_idx: u8) -> u8 {

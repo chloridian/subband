@@ -112,6 +112,7 @@ impl<'a> Image<'a> {
         j2c::decode(self.codestream, &self.header, decoder_context, cancel)?;
         Ok(DecodedImage {
             decoded_components: &mut decoder_context.channel_data,
+            layers_received: &decoder_context.layers_received,
             cancel,
         })
     }
@@ -120,6 +121,10 @@ impl<'a> Image<'a> {
 impl DecodedImage<'_> {
     pub fn components(&self) -> &[ComponentData] {
         self.decoded_components
+    }
+
+    pub fn layers_received(&self) -> &[u8] {
+        self.layers_received
     }
 
     pub fn data_u8(&self) -> result::Result<Vec<u8>, Cancelled> {

@@ -778,7 +778,7 @@ fn parse_packet_header(
     }
 
     let header_reader = tile_part.header();
-    let zero_length = header_reader.read_bits_with_stuffing(1)? == 0;
+    let zero_length = header_reader.read_bits_with_stuffing(1).ok()? == 0;
     let mut body_len = 0_usize;
 
     if !zero_length {
@@ -821,15 +821,19 @@ fn resolve_sub_band_length(
 
     for cb in code_blocks {
         let is_included = if cb.has_been_included {
-            reader.read_bits_with_stuffing(1)? == 1
+            reader.read_bits_with_stuffing(1).ok()? == 1
         } else {
-            precinct.code_inclusion_tree.read(
-                cb.x_idx,
-                cb.y_idx,
-                reader,
-                u32::from(prog_data.layer_num) + 1,
-                &mut state.tag_tree_nodes,
-            )? <= u32::from(prog_data.layer_num)
+            precinct
+                .code_inclusion_tree
+                .read(
+                    cb.x_idx,
+                    cb.y_idx,
+                    reader,
+                    u32::from(prog_data.layer_num) + 1,
+                    &mut state.tag_tree_nodes,
+                )
+                .ok()?
+                <= u32::from(prog_data.layer_num)
         };
 
         if !is_included {
@@ -837,43 +841,46 @@ fn resolve_sub_band_length(
         }
 
         if !cb.has_been_included {
-            precinct.zero_bitplane_tree.read(
-                cb.x_idx,
-                cb.y_idx,
-                reader,
-                u32::MAX,
-                &mut state.tag_tree_nodes,
-            )?;
+            precinct
+                .zero_bitplane_tree
+                .read(
+                    cb.x_idx,
+                    cb.y_idx,
+                    reader,
+                    u32::MAX,
+                    &mut state.tag_tree_nodes,
+                )
+                .ok()?;
             cb.has_been_included = true;
         }
 
         let added_passes = if reader.peak_bits_with_stuffing(9) == Some(0x1ff) {
-            reader.read_bits_with_stuffing(9)?;
-            reader.read_bits_with_stuffing(7)? + 37
+            reader.read_bits_with_stuffing(9).ok()?;
+            reader.read_bits_with_stuffing(7).ok()? + 37
         } else if reader.peak_bits_with_stuffing(4) == Some(0x0f) {
-            reader.read_bits_with_stuffing(4)?;
-            reader.read_bits_with_stuffing(5)? + 6
+            reader.read_bits_with_stuffing(4).ok()?;
+            reader.read_bits_with_stuffing(5).ok()? + 6
         } else if reader.peak_bits_with_stuffing(4) == Some(0b1110) {
-            reader.read_bits_with_stuffing(4)?;
+            reader.read_bits_with_stuffing(4).ok()?;
             5
         } else if reader.peak_bits_with_stuffing(4) == Some(0b1101) {
-            reader.read_bits_with_stuffing(4)?;
+            reader.read_bits_with_stuffing(4).ok()?;
             4
         } else if reader.peak_bits_with_stuffing(4) == Some(0b1100) {
-            reader.read_bits_with_stuffing(4)?;
+            reader.read_bits_with_stuffing(4).ok()?;
             3
         } else if reader.peak_bits_with_stuffing(2) == Some(0b10) {
-            reader.read_bits_with_stuffing(2)?;
+            reader.read_bits_with_stuffing(2).ok()?;
             2
         } else if reader.peak_bits_with_stuffing(1) == Some(0) {
-            reader.read_bits_with_stuffing(1)?;
+            reader.read_bits_with_stuffing(1).ok()?;
             1
         } else {
             return None;
         } as u8;
 
         let mut k = 0_u32;
-        while reader.read_bits_with_stuffing(1)? == 1 {
+        while reader.read_bits_with_stuffing(1).ok()? == 1 {
             k = k.checked_add(1)?;
         }
         cb.l_block = cb.l_block.checked_add(k)?;
@@ -901,7 +908,9 @@ fn resolve_sub_band_length(
             let segment = get_segment_idx(coding_pass);
             if segment != last_segment {
                 let length_bits = cb.l_block + passes_for_segment.ilog2();
-                let seg_len = reader.read_bits_with_stuffing(u8::try_from(length_bits).ok()?)?;
+                let seg_len = reader
+                    .read_bits_with_stuffing(u8::try_from(length_bits).ok()?)
+                    .ok()?;
                 total_len = total_len.checked_add(seg_len as usize)?;
                 last_segment = segment;
                 passes_for_segment = 1;
@@ -912,7 +921,9 @@ fn resolve_sub_band_length(
 
         if passes_for_segment > 0 {
             let length_bits = cb.l_block + passes_for_segment.ilog2();
-            let seg_len = reader.read_bits_with_stuffing(u8::try_from(length_bits).ok()?)?;
+            let seg_len = reader
+                .read_bits_with_stuffing(u8::try_from(length_bits).ok()?)
+                .ok()?;
             total_len = total_len.checked_add(seg_len as usize)?;
         }
 
