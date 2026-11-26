@@ -1,5 +1,4 @@
 use std::boxed::Box;
-use std::vec;
 use std::vec::Vec;
 
 use super::bitplane::{BitPlaneDecodeBuffers, BitPlaneDecodeContext};
@@ -68,6 +67,7 @@ pub(crate) fn decode<'a>(
             header,
             decoded_resolutions,
             &ctx.received_packets,
+            &mut ctx.expected_packets,
             &mut ctx.layers_received,
         )?;
     }
@@ -91,68 +91,36 @@ fn update_layers_received(
     header: &Header,
     decoded_resolutions: usize,
     received_packets: &[u64],
+    expected_packets: &mut Vec<u64>,
     layers_received: &mut [u8],
 ) -> Result<()> {
     let num_layers = usize::from(tile.num_layers);
-    let effective_layers = usize::from(
-        header
-            .max_layers
-            .map_or(tile.num_layers, |m| m.min(tile.num_layers)),
-    );
-    let has_poc = !tile.progression_changes.is_empty() || !header.progression_changes.is_empty();
+    let effective_layers = header
+        .max_layers
+        .map_or(tile.num_layers, |m| m.min(tile.num_layers));
 
-    if has_poc {
-        let mut expected = vec![0_u64; decoded_resolutions * num_layers];
-        for data in progression_iterator(tile, header)? {
-            let r = usize::from(data.resolution);
-            let l = usize::from(data.layer_num);
-            if r < decoded_resolutions
-                && let Some(slot) = expected.get_mut(r * num_layers + l)
-            {
-                *slot = slot.saturating_add(1);
-            }
+    expected_packets.clear();
+    expected_packets.resize(decoded_resolutions * num_layers, 0);
+    for data in progression_iterator(tile, header)? {
+        let r = usize::from(data.resolution);
+        let l = usize::from(data.layer_num);
+        if r < decoded_resolutions
+            && let Some(slot) = expected_packets.get_mut(r * num_layers + l)
+        {
+            *slot = slot.saturating_add(1);
         }
-        for (r, out) in layers_received.iter_mut().enumerate() {
-            let mut complete = 0_u8;
-            for l in 0..effective_layers {
-                let exp = expected.get(r * num_layers + l).copied().unwrap_or(0);
-                let rec = received_packets
-                    .get(r * num_layers + l)
-                    .copied()
-                    .unwrap_or(0);
-                if exp > 0 && rec >= exp {
-                    complete += 1;
-                } else {
-                    break;
-                }
-            }
-            *out = (*out).min(complete);
-        }
-        return Ok(());
     }
 
     for (r, out) in layers_received.iter_mut().enumerate() {
-        let mut expected_r = 0_u64;
-        for info in &tile.component_infos {
-            if r < usize::from(info.num_resolution_levels()) {
-                let ct = ComponentTile::new(tile, info);
-                expected_r =
-                    expected_r.saturating_add(ResolutionTile::new(ct, r as u8).num_precincts());
-            }
-        }
-        let mut complete = 0_u8;
-        for l in 0..effective_layers {
-            let rec = received_packets
-                .get(r * num_layers + l)
-                .copied()
-                .unwrap_or(0);
-            if expected_r > 0 && rec >= expected_r {
-                complete += 1;
-            } else {
-                break;
-            }
-        }
-        *out = (*out).min(complete);
+        let complete = (0..usize::from(effective_layers))
+            .take_while(|l| {
+                let i = r * num_layers + l;
+                let expected = expected_packets.get(i).copied().unwrap_or(0);
+                let received = received_packets.get(i).copied().unwrap_or(0);
+                expected > 0 && received >= expected
+            })
+            .count();
+        *out = (*out).min(u8::try_from(complete).unwrap_or(u8::MAX));
     }
 
     Ok(())
@@ -164,6 +132,7 @@ pub struct DecoderContext<'a> {
     pub(crate) channel_data: Vec<ComponentData>,
     pub(crate) layers_received: Vec<u8>,
     received_packets: Vec<u64>,
+    expected_packets: Vec<u64>,
     storage: DecompositionStorage<'a>,
 }
 
