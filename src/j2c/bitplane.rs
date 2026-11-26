@@ -15,6 +15,7 @@ pub(crate) fn decode(
     style: &CodeBlockStyle,
     tile_ctx: &mut TileDecodeContext,
     storage: &DecompositionStorage<'_>,
+    max_layers: Option<u8>,
     strict: bool,
 ) -> Result<()> {
     tile_ctx.bit_plane_decode_context.reset(
@@ -31,6 +32,7 @@ pub(crate) fn decode(
         storage,
         &mut tile_ctx.bit_plane_decode_context,
         &mut tile_ctx.bit_plane_decode_buffers,
+        max_layers,
     )
     .ok_or(DecodeError::Malformed)?;
 
@@ -42,13 +44,20 @@ fn decode_inner(
     storage: &DecompositionStorage<'_>,
     ctx: &mut BitPlaneDecodeContext,
     bp_buffers: &mut BitPlaneDecodeBuffers,
+    max_layers: Option<u8>,
 ) -> Option<()> {
     bp_buffers.reset();
 
     let mut last_segment_idx = 0;
     let mut coding_passes = 0;
+    let layer_limit = max_layers.map_or(usize::MAX, usize::from);
 
-    for layer in storage.layers.get(code_block.layers.clone())? {
+    for layer in storage
+        .layers
+        .get(code_block.layers.clone())?
+        .iter()
+        .take(layer_limit)
+    {
         if let Some(range) = layer.segments.clone() {
             let layer_segments = storage.segments.get(range)?;
             for segment in layer_segments {
@@ -68,7 +77,13 @@ fn decode_inner(
         }
     }
 
-    assert_eq!(coding_passes, code_block.number_of_coding_passes);
+    if max_layers.is_none() {
+        assert_eq!(coding_passes, code_block.number_of_coding_passes);
+    }
+
+    if coding_passes == 0 {
+        return Some(());
+    }
 
     bp_buffers
         .segment_ranges
@@ -80,9 +95,7 @@ fn decode_inner(
 
     if is_normal_mode {
         let mut decoder = ArithmeticDecoder::new(&bp_buffers.combined_layers);
-        let end = code_block
-            .number_of_coding_passes
-            .min(ctx.max_coding_passes);
+        let end = coding_passes.min(ctx.max_coding_passes);
 
         if ctx.can_use_fast_path() {
             fast_path::handle_coding_passes(0, end, ctx, &mut decoder)?;

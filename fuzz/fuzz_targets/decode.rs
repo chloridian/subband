@@ -6,7 +6,7 @@ use subband::{DecodeSettings, DecoderContext, Image};
 fn run(data: &[u8], strict: bool) {
     let settings = DecodeSettings {
         strict,
-        target_resolution: Some((512, 512)),
+        discard: 1,
         ..DecodeSettings::default()
     };
     let Ok(image) = Image::from_codestream(data, &settings) else {

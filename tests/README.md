@@ -22,7 +22,7 @@ oxipng -o max --nx tests/references/*.png
 - `quantization.rs`: reversible and irreversible quantization styles and multi-layer rate control.
 - `roi.rs`: region-of-interest maxshift decoding.
 - `tile_parts.rs`: split and interleaved tile-parts, SOT/Psot/TNsot edge cases, and truncated streams.
-- `wavelet.rs`: reduced-resolution decoding via `target_resolution`.
+- `wavelet.rs`: reduced-resolution decoding via `discard` and `max_layers`.
 
 ## Provenance
 

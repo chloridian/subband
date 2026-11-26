@@ -353,6 +353,7 @@ fn decode_sub_band_bitplanes(
                 &component_info.coding_style.parameters.code_block_style,
                 tile_ctx,
                 storage,
+                header.max_layers,
                 header.strict,
             )?;
 

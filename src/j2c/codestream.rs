@@ -41,7 +41,9 @@ pub(crate) struct Header {
     pub(crate) component_infos: Vec<ComponentInfo>,
     pub(crate) ppm_packets: Vec<PpmPacket>,
     pub(crate) progression_changes: Vec<ProgressionChange>,
+    pub(crate) levels: u8,
     pub(crate) skipped_resolution_levels: u8,
+    pub(crate) max_layers: Option<u8>,
     pub(crate) strict: bool,
     pub(crate) marker_budget: MarkerBudget,
 }
@@ -163,29 +165,13 @@ pub(crate) fn read_header<'a>(
 
     validate_resource_limits(&size_data, &component_infos, cod.num_layers)?;
 
-    let min_num_resolution_levels = component_infos
+    let levels = component_infos
         .iter()
-        .map(|c| c.num_resolution_levels())
+        .map(|c| c.num_decomposition_levels())
         .min()
         .ok_or(DecodeError::Malformed)?;
-    let skipped_resolution_levels =
-        if let Some((target_width, target_height)) = settings.target_resolution {
-            let width_log = size_data
-                .image_width()
-                .checked_div(target_width)
-                .and_then(|v| v.checked_ilog2())
-                .unwrap_or(0);
-            let height_log = size_data
-                .image_height()
-                .checked_div(target_height)
-                .and_then(|v| v.checked_ilog2())
-                .unwrap_or(0);
-
-            width_log.min(height_log) as u8
-        } else {
-            0
-        }
-        .min(min_num_resolution_levels - 1);
+    let skipped_resolution_levels = settings.discard.min(levels);
+    let max_layers = settings.max_layers.map(|n| n.max(1));
 
     size_data.resolution_shrink_factor *= 1 << skipped_resolution_levels;
 
@@ -204,7 +190,9 @@ pub(crate) fn read_header<'a>(
         component_infos,
         ppm_packets,
         progression_changes,
+        levels,
         skipped_resolution_levels,
+        max_layers,
         strict: settings.strict,
         marker_budget,
     };

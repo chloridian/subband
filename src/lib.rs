@@ -32,7 +32,8 @@ const DEFAULT_MAX_OUTPUT: usize = 64 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct DecodeSettings {
     pub strict: bool,
-    pub target_resolution: Option<(u32, u32)>,
+    pub discard: u8,
+    pub max_layers: Option<u8>,
     pub cancel: Option<CancelHandle>,
     pub max_edge: u32,
     pub max_input: usize,
@@ -43,7 +44,8 @@ impl Default for DecodeSettings {
     fn default() -> Self {
         Self {
             strict: false,
-            target_resolution: None,
+            discard: 0,
+            max_layers: None,
             cancel: None,
             max_edge: DEFAULT_MAX_EDGE,
             max_input: DEFAULT_MAX_INPUT,
@@ -91,6 +93,14 @@ impl<'a> Image<'a> {
 
     pub fn height(&self) -> u32 {
         self.header.size_data.image_height()
+    }
+
+    pub fn levels(&self) -> u8 {
+        self.header.levels
+    }
+
+    pub fn layers(&self) -> u8 {
+        self.header.global_coding_style.num_layers
     }
 
     pub fn decode<'b>(

@@ -728,7 +728,9 @@ mod tests {
             component_infos: vec![],
             ppm_packets: vec![],
             progression_changes: vec![],
+            levels: 0,
             skipped_resolution_levels: 0,
+            max_layers: None,
             strict: false,
             marker_budget: MarkerBudget::default(),
         };
