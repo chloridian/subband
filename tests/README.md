@@ -10,6 +10,20 @@ Before submitting new reference images, optimize them with [oxipng](https://gith
 oxipng -o max --nx tests/references/*.png
 ```
 
+## Test files
+
+- `cancel.rs`: cooperative cancellation during decoding.
+- `code_blocks.rs`: code-block coding styles (bypass, reset, termall, vcausal, pterm, segsym) and bitplane edge cases.
+- `codestream.rs`: image and tile geometry, decomposition levels, code-block and precinct sizes, guard bits, and marker segments.
+- `errors.rs`: rejection of malformed codestreams, unsupported features, and size or resource limits.
+- `jp2.rs`: JP2 container unwrapping, box lengths, and header validation.
+- `mct.rs`: reversible and irreversible multi-component transforms.
+- `packets.rs`: progression orders, SOP/EPH markers, PPM/PPT packed headers, POC changes, and empty packets.
+- `quantization.rs`: reversible and irreversible quantization styles and multi-layer rate control.
+- `roi.rs`: region-of-interest maxshift decoding.
+- `tile_parts.rs`: split and interleaved tile-parts, SOT/Psot/TNsot edge cases, and truncated streams.
+- `wavelet.rs`: reduced-resolution decoding via `target_resolution`.
+
 ## Provenance
 
 The tests replace a suite of files from SerenityOS, OpenJPEG and hayro itself. Each test is marked with the files whose coverage it took over. **Custom** marks hayro's own files, which covered code paths specific to hayro's implementation or bugs that hayro had.
