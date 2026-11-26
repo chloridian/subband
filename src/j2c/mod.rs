@@ -11,8 +11,6 @@ mod segment;
 mod tag_tree;
 mod tile;
 
-use super::jp2::ImageBoxes;
-use super::jp2::colr::{ColorSpace, ColorSpecificationBox, EnumeratedColorspace};
 use crate::error::{FormatError, MarkerError, Result, bail};
 use crate::j2c::codestream::markers;
 use crate::reader::BitReader;
@@ -54,7 +52,6 @@ pub(crate) fn parse<'a>(
 ) -> Result<Image<'a>> {
     let parsed_codestream = parse_raw(stream, settings)?;
     let header = &parsed_codestream.header;
-    let mut boxes = ImageBoxes::default();
 
     let (color_space, has_alpha) = if let Some(channels) = color_channels {
         let color_space = match channels {
@@ -68,21 +65,12 @@ pub(crate) fn parse<'a>(
             header.component_infos.len() == usize::from(channels) + 1,
         )
     } else {
-        let cs = if header.component_infos.len() < 3 {
-            ColorSpace::Enumerated(EnumeratedColorspace::Greyscale)
-        } else {
-            ColorSpace::Enumerated(EnumeratedColorspace::Srgb)
-        };
-
-        boxes.color_specification = Some(ColorSpecificationBox { color_space: cs });
-
-        resolve_alpha_and_color_space(&boxes, &parsed_codestream.header, settings)?
+        resolve_alpha_and_color_space(&parsed_codestream.header)?
     };
 
     Ok(Image {
         codestream: parsed_codestream.data,
         header: parsed_codestream.header,
-        boxes,
         settings: settings.clone(),
         color_space,
         has_alpha,

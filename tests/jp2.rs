@@ -31,16 +31,6 @@ fn rgba() {
 }
 
 #[test]
-fn cdef_alpha_not_last() {
-    check("jp2_cdef_alpha_not_last", reference("main_rgba"));
-}
-
-#[test]
-fn cdef_reordered() {
-    check("jp2_cdef_reordered", reference("main_rgba"));
-}
-
-#[test]
 fn bpcc() {
     check("jp2_bpcc", reference("main_rgba_5_5_5_1bit"));
 }

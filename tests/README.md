@@ -212,8 +212,6 @@ The tests replace a suite of files from SerenityOS, OpenJPEG and hayro itself. E
 | `gray_alpha` | SerenityOS (`kakadu-lossless-gray-alpha-u8-prog1-layers1-res6.jp2`), OpenJPEG (`basn4a08.jp2`) |
 | `alpha_whole_image` | OpenJPEG (`Marrin.jp2`), OpenJPEG (`issue653-zero-unknownbox.jp2`) |
 | `rgba` | OpenJPEG (`basn6a08.jp2`), SerenityOS (`kakadu-lossless-rgba-u8-prog1-layers1-res6-mct.jp2`) |
-| `cdef_alpha_not_last` | SerenityOS (`kakadu-lossy-rgba-u8-prog0-layers1-res6-mct.jp2`) |
-| `cdef_reordered` | SerenityOS (`openjpeg-lossless-bgra-u8.jp2`) |
 | `bpcc` | OpenJPEG (`issue458.jp2`) |
 | `jpx_brand_rreq` | OpenJPEG (`file5.jp2`), OpenJPEG (`file7.jp2`), SerenityOS (`buggie-gray.jpf`), OpenJPEG (`issue104_jpxstream.jp2`) |
 | `extra_boxes` | OpenJPEG (`file1.jp2`), OpenJPEG (`file8.jp2`), OpenJPEG (`small_world_non_consecutive_tilepart_tlm.jp2`), OpenJPEG (`Marrin.jp2`), OpenJPEG (`issue171.jp2`) |

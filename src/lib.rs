@@ -1,9 +1,8 @@
 /*!
 Subband is a fork of [hayro-jpeg2000](https://github.com/LaurenzV/hayro), tuned for the
 textures Second Life serves: raw JPEG 2000 codestreams (`.j2c`) from untrusted sources,
-decoded at reduced resolution and cancelled when no longer needed. It still decodes the
-JP2 container format and most of the JPEG 2000 core coding system (ISO/IEC 15444-1), as
-well as some color spaces from the extensions (ISO/IEC 15444-2). An encoder is planned.
+decoded at reduced resolution and cancelled when no longer needed. It also unwraps the
+JP2 container format to decode its codestream. An encoder is planned.
 
 # Example
 ```rust,no_run
@@ -46,11 +45,8 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::error::{bail, err};
+use crate::error::err;
 use crate::j2c::Header;
-use crate::jp2::ImageBoxes;
-use crate::jp2::cdef::{ChannelAssociation, ChannelType};
-use crate::jp2::colr::EnumeratedColorspace;
 
 mod cancel;
 pub mod error;
@@ -90,7 +86,6 @@ pub struct DecodeSettings {
 pub struct Image<'a> {
     pub(crate) codestream: &'a [u8],
     pub(crate) header: Header,
-    pub(crate) boxes: ImageBoxes,
     pub(crate) settings: DecodeSettings,
     pub(crate) has_alpha: bool,
     pub(crate) color_space: ColorSpace,
@@ -155,83 +150,21 @@ impl<'a> Image<'a> {
         let settings = &self.settings;
         let cancel = Cancel(settings.cancel.as_ref());
         j2c::decode(self.codestream, &self.header, decoder_context, cancel)?;
-        let decoded_image = DecodedImage {
+        Ok(DecodedImage {
             decoded_components: &mut decoder_context.channel_data,
-            boxes: self.boxes.clone(),
             cancel,
-        };
-
-        if let Some(cdef) = &decoded_image.boxes.channel_definition {
-            // Assumes each component is referenced only once.
-            // TODO: Move the components instead of cloning them.
-            let mut components = decoded_image
-                .decoded_components
-                .iter()
-                .cloned()
-                .zip(
-                    cdef.channel_definitions
-                        .iter()
-                        .map(|c| match c._association {
-                            ChannelAssociation::WholeImage => u16::MAX,
-                            ChannelAssociation::Colour(c) => c,
-                        }),
-                )
-                .collect::<Vec<_>>();
-            components.sort_by_key(|c1| c1.1);
-            *decoded_image.decoded_components = components.into_iter().map(|c| c.0).collect();
-        }
-
-        Ok(decoded_image)
+        })
     }
 }
 
-pub(crate) fn resolve_alpha_and_color_space(
-    boxes: &ImageBoxes,
-    header: &Header,
-    settings: &DecodeSettings,
-) -> Result<(ColorSpace, bool)> {
-    let actual_num_components = header.component_infos.len();
-    let mut has_alpha = false;
-
-    if let Some(cdef) = &boxes.channel_definition {
-        let last = cdef.channel_definitions.last().unwrap();
-        has_alpha = last.channel_type == ChannelType::Opacity;
+pub(crate) fn resolve_alpha_and_color_space(header: &Header) -> Result<(ColorSpace, bool)> {
+    match header.component_infos.len() {
+        1 => Ok((ColorSpace::Gray, false)),
+        2 => Ok((ColorSpace::Gray, true)),
+        3 => Ok((ColorSpace::RGB, false)),
+        4 => Ok((ColorSpace::RGB, true)),
+        _ => err!(FormatError::Unsupported),
     }
-
-    let mut color_space = get_color_space(boxes, actual_num_components)?;
-
-    if actual_num_components
-        != (color_space.num_channels() + if has_alpha { 1 } else { 0 }) as usize
-    {
-        if !settings.strict
-            && actual_num_components == color_space.num_channels() as usize + 1
-            && !has_alpha
-        {
-            has_alpha = true;
-        } else {
-            match actual_num_components {
-                1 => {
-                    color_space = ColorSpace::Gray;
-                    has_alpha = false;
-                }
-                2 => {
-                    color_space = ColorSpace::Gray;
-                    has_alpha = true;
-                }
-                3 => {
-                    color_space = ColorSpace::RGB;
-                    has_alpha = false;
-                }
-                4 => {
-                    color_space = ColorSpace::RGB;
-                    has_alpha = true;
-                }
-                _ => bail!(FormatError::Unsupported),
-            }
-        }
-    }
-
-    Ok((color_space, has_alpha))
 }
 
 /// The color space of the image.
@@ -425,27 +358,4 @@ fn interleave_to_u8_impl<S: Simd, const N: usize>(
             *value = math::round_to_u8(plane[blocks + i] * scale);
         }
     }
-}
-
-fn get_color_space(boxes: &ImageBoxes, num_components: usize) -> Result<ColorSpace> {
-    let cs = match boxes
-        .color_specification
-        .as_ref()
-        .map(|c| &c.color_space)
-        .unwrap_or(&jp2::colr::ColorSpace::Unknown)
-    {
-        jp2::colr::ColorSpace::Enumerated(e) => match e {
-            EnumeratedColorspace::Srgb | EnumeratedColorspace::EsRgb => ColorSpace::RGB,
-            EnumeratedColorspace::Greyscale => ColorSpace::Gray,
-            EnumeratedColorspace::Other => bail!(FormatError::Unsupported),
-        },
-        jp2::colr::ColorSpace::Icc => bail!(FormatError::Unsupported),
-        jp2::colr::ColorSpace::Unknown => match num_components {
-            1 | 2 => ColorSpace::Gray,
-            3 | 4 => ColorSpace::RGB,
-            _ => bail!(FormatError::Unsupported),
-        },
-    };
-
-    Ok(cs)
 }
