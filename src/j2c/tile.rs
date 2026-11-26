@@ -3,12 +3,15 @@ use std::vec::Vec;
 
 use super::build::{PrecinctData, SubBandType};
 use super::codestream::{
-    ComponentInfo, Header, ProgressionChange, ProgressionOrder, markers, skip_marker_segment,
+    ComponentInfo, Header, MarkerBudget, ProgressionChange, ProgressionOrder, markers,
+    skip_marker_segment, validate_resource_limits,
 };
 use super::rect::IntRect;
-use crate::error::{MarkerError, Result, TileError, ValidationError, bail, err};
+use crate::error::{DecodeError, Result, bail};
 use crate::j2c::codestream;
 use crate::reader::BitReader;
+
+const MAX_TILE_PARTS_PER_TILE: usize = 1024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Tile<'a> {
@@ -113,18 +116,31 @@ pub(crate) fn parse<'a>(
         .map(|idx| Tile::new(idx, main_header))
         .collect::<Vec<_>>();
 
+    let mut marker_budget = main_header.marker_budget;
     let mut tile_part_idx = 0;
 
-    parse_tile_part(reader, main_header, &mut tiles, tile_part_idx)?;
+    parse_tile_part(
+        reader,
+        main_header,
+        &mut tiles,
+        tile_part_idx,
+        &mut marker_budget,
+    )?;
     tile_part_idx += 1;
 
     while reader.peek_marker() == Some(markers::SOT) {
-        parse_tile_part(reader, main_header, &mut tiles, tile_part_idx)?;
+        parse_tile_part(
+            reader,
+            main_header,
+            &mut tiles,
+            tile_part_idx,
+            &mut marker_budget,
+        )?;
         tile_part_idx += 1;
     }
 
     if main_header.strict && reader.read_marker()? != markers::EOC {
-        bail!(MarkerError::Expected("EOC"));
+        bail!(DecodeError::Malformed);
     }
 
     Ok(tiles)
@@ -135,37 +151,46 @@ fn parse_tile_part<'a>(
     main_header: &'a Header,
     tiles: &mut [Tile<'a>],
     tile_part_idx: usize,
+    marker_budget: &mut MarkerBudget,
 ) -> Result<()> {
     if reader.read_marker()? != markers::SOT {
-        bail!(MarkerError::Expected("SOT"));
+        bail!(DecodeError::Malformed);
     }
 
-    let tile_part_header = sot_marker(reader).ok_or(MarkerError::ParseFailure("SOT"))?;
+    let sot_start = reader.offset();
+    let tile_part_header = sot_marker(reader).ok_or(DecodeError::Malformed)?;
+    marker_budget.record(reader.offset() - sot_start)?;
 
     if tile_part_header.tile_index as u32 >= main_header.size_data.num_tiles()? {
-        bail!(TileError::InvalidIndex);
+        bail!(DecodeError::Malformed);
     }
 
     let data_len = if tile_part_header.tile_part_length == 0 {
         reader.tail().map(|d| d.len()).unwrap_or(0)
     } else {
-        // Psot includes the 12-byte SOT marker segment.
-        (tile_part_header.tile_part_length as usize)
+        let len = (tile_part_header.tile_part_length as usize)
             .checked_sub(12)
-            .ok_or(TileError::Invalid)?
+            .ok_or(DecodeError::Malformed)?;
+        if main_header.strict && len > reader.tail().map(|d| d.len()).unwrap_or(0) {
+            bail!(DecodeError::Malformed);
+        }
+        len
     };
 
     let start = reader.offset();
 
     let tile = &mut tiles[tile_part_header.tile_index as usize];
+    if tile.tile_parts.len() >= MAX_TILE_PARTS_PER_TILE {
+        bail!(DecodeError::TooLarge);
+    }
 
     let mut ppt_headers = vec![];
+    let mut coding_style_changed = false;
 
     loop {
-        // Some files have tile-parts without an SOD marker.
         if reader.offset() - start >= data_len {
             return if main_header.strict {
-                err!(MarkerError::Expected("SOD"))
+                Err(DecodeError::Malformed)
             } else {
                 Ok(())
             };
@@ -173,20 +198,26 @@ fn parse_tile_part<'a>(
 
         let Some(marker) = reader.peek_marker() else {
             return if main_header.strict {
-                err!(MarkerError::Invalid)
+                Err(DecodeError::Malformed)
             } else {
                 Ok(())
             };
         };
 
+        if marker == markers::EOC {
+            break;
+        }
+
+        reader.read_marker()?;
+        let seg_start = reader.offset();
+
         match marker {
             markers::SOD => {
-                reader.read_marker()?;
+                marker_budget.record(0)?;
                 break;
             }
             markers::COD => {
-                reader.read_marker()?;
-                let cod = codestream::cod_marker(reader).ok_or(MarkerError::ParseFailure("COD"))?;
+                let cod = codestream::cod_marker(reader)?;
 
                 tile.mct = cod.mct;
                 tile.num_layers = cod.num_layers;
@@ -196,86 +227,84 @@ fn parse_tile_part<'a>(
                     component.coding_style.flags.raw |= cod.component_parameters.flags.raw;
                     component.coding_style.parameters = cod.component_parameters.clone().parameters;
                 }
+                coding_style_changed = true;
             }
             markers::COC => {
-                reader.read_marker()?;
-
-                let (component_index, coc) =
-                    codestream::coc_marker(reader).ok_or(MarkerError::ParseFailure("COC"))?;
+                let (component_index, coc) = codestream::coc_marker(reader)?;
 
                 let old = tile
                     .component_infos
                     .get_mut(component_index as usize)
-                    .ok_or(ValidationError::InvalidComponentMetadata)?;
+                    .ok_or(DecodeError::Malformed)?;
 
                 old.coding_style.parameters = coc.parameters;
                 old.coding_style.flags.raw |= coc.flags.raw;
+                coding_style_changed = true;
             }
             markers::QCD => {
-                reader.read_marker()?;
-                let qcd = codestream::qcd_marker(reader).ok_or(MarkerError::ParseFailure("QCD"))?;
+                let qcd = codestream::qcd_marker(reader).ok_or(DecodeError::Malformed)?;
 
                 for component_info in &mut tile.component_infos {
                     component_info.quantization_info = qcd.clone();
                 }
             }
             markers::QCC => {
-                reader.read_marker()?;
                 let (component_index, qcc) =
-                    codestream::qcc_marker(reader).ok_or(MarkerError::ParseFailure("QCC"))?;
+                    codestream::qcc_marker(reader).ok_or(DecodeError::Malformed)?;
 
                 tile.component_infos
                     .get_mut(component_index as usize)
-                    .ok_or(ValidationError::InvalidComponentMetadata)?
+                    .ok_or(DecodeError::Malformed)?
                     .quantization_info = qcc.clone();
             }
-            markers::EOC => break,
             markers::PPT => {
                 if !main_header.ppm_packets.is_empty() {
-                    bail!(TileError::PpmPptConflict);
+                    bail!(DecodeError::Malformed);
                 }
 
-                reader.read_marker()?;
-                ppt_headers.push(ppt_marker(reader).ok_or(MarkerError::ParseFailure("PPT"))?);
+                ppt_headers.push(ppt_marker(reader).ok_or(DecodeError::Malformed)?);
             }
             markers::RGN => {
-                reader.read_marker()?;
                 let (component_index, roi_shift) =
-                    codestream::rgn_marker(reader).ok_or(MarkerError::ParseFailure("RGN"))?;
+                    codestream::rgn_marker(reader).ok_or(DecodeError::Malformed)?;
 
                 tile.component_infos
                     .get_mut(component_index as usize)
-                    .ok_or(ValidationError::InvalidComponentMetadata)?
+                    .ok_or(DecodeError::Malformed)?
                     .roi_shift = roi_shift;
             }
             markers::POC => {
-                reader.read_marker()?;
-                tile.progression_changes.extend(
-                    codestream::poc_marker(reader).ok_or(MarkerError::ParseFailure("POC"))?,
-                );
+                tile.progression_changes
+                    .extend(codestream::poc_marker(reader).ok_or(DecodeError::Malformed)?);
             }
             markers::PLT => {
-                reader.read_marker()?;
-                skip_marker_segment(reader).ok_or(MarkerError::ParseFailure("PLT"))?;
+                skip_marker_segment(reader).ok_or(DecodeError::Malformed)?;
             }
             markers::COM => {
-                reader.read_marker()?;
-                skip_marker_segment(reader).ok_or(MarkerError::ParseFailure("COM"))?;
+                skip_marker_segment(reader).ok_or(DecodeError::Malformed)?;
             }
-            (0x30..=0x3F) => {
-                reader.read_marker()?;
-            }
+            (0x30..=0x3F) => {}
             _ => {
-                bail!(MarkerError::Unsupported);
+                bail!(DecodeError::Unsupported);
             }
         }
+
+        marker_budget.record(reader.offset() - seg_start)?;
+    }
+
+    if coding_style_changed {
+        validate_resource_limits(
+            &main_header.size_data,
+            &tile.component_infos,
+            tile.num_layers,
+        )?;
     }
 
     let remaining_bytes = if let Some(len) = data_len.checked_sub(reader.offset() - start) {
         len
     } else {
         return if main_header.strict {
-            err!(TileError::Invalid)
+            Err(DecodeError::Malformed)
         } else {
             Ok(())
         };
@@ -291,11 +320,11 @@ fn parse_tile_part<'a>(
     let data = match reader.read_bytes(remaining_bytes) {
         Some(data) => data,
         None if !main_header.strict => {
-            let data = reader.tail().ok_or(TileError::Invalid)?;
+            let data = reader.tail().ok_or(DecodeError::Malformed)?;
             reader.jump_to_end();
             data
         }
-        None => bail!(TileError::Invalid),
+        None => bail!(DecodeError::Malformed),
     };
 
     let tile_part = if !headers.is_empty() {
@@ -693,6 +722,7 @@ mod tests {
             progression_changes: vec![],
             skipped_resolution_levels: 0,
             strict: false,
+            marker_budget: MarkerBudget::default(),
         };
 
         let tile_0_0 = Tile::new(0, &header);

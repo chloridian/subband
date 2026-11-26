@@ -5,7 +5,7 @@ use std::vec::Vec;
 
 use super::codestream::{Header, ProgressionOrder};
 use super::tile::{ComponentTile, ResolutionTile, Tile};
-use crate::error::{DecodingError, Result};
+use crate::error::{DecodeError, Result};
 use core::cmp::Ordering;
 use core::iter;
 
@@ -167,16 +167,13 @@ fn progression_order_iterator<'a>(
             Box::new(resolution_layer_component_position_progression(input))
         }
         ProgressionOrder::ResolutionPositionComponentLayer => Box::new(
-            resolution_position_component_layer_progression(input)
-                .ok_or(DecodingError::InvalidProgressionIterator)?,
+            resolution_position_component_layer_progression(input).ok_or(DecodeError::Malformed)?,
         ),
         ProgressionOrder::PositionComponentResolutionLayer => Box::new(
-            position_component_resolution_layer_progression(input)
-                .ok_or(DecodingError::InvalidProgressionIterator)?,
+            position_component_resolution_layer_progression(input).ok_or(DecodeError::Malformed)?,
         ),
         ProgressionOrder::ComponentPositionResolutionLayer => Box::new(
-            component_position_resolution_layer_progression(input)
-                .ok_or(DecodingError::InvalidProgressionIterator)?,
+            component_position_resolution_layer_progression(input).ok_or(DecodeError::Malformed)?,
         ),
     })
 }

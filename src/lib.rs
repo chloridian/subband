@@ -40,7 +40,6 @@ via a crate-level attribute.
 use std::vec;
 use std::vec::Vec;
 
-use crate::error::err;
 use crate::j2c::Header;
 
 mod cancel;
@@ -51,10 +50,7 @@ use cancel::{CHUNK, Cancel};
 pub use cancel::{CancelCheck, CancelHandle};
 
 use crate::math::{Level, Simd, dispatch};
-pub use error::{
-    Cancelled, DecodeError, DecodingError, FormatError, MarkerError, Result, TileError,
-    ValidationError,
-};
+pub use error::{Cancelled, DecodeError, Result};
 pub use j2c::{ComponentData, DecoderContext};
 pub use jp2::DecodedImage;
 
@@ -65,8 +61,12 @@ pub(crate) mod reader;
 pub(crate) const JP2_MAGIC: &[u8] = b"\x00\x00\x00\x0C\x6A\x50\x20\x20";
 pub(crate) const CODESTREAM_MAGIC: &[u8] = b"\xFF\x4F\xFF\x51";
 
+const DEFAULT_MAX_EDGE: u32 = 4096;
+const DEFAULT_MAX_INPUT: usize = 32 * 1024 * 1024;
+const DEFAULT_MAX_OUTPUT: usize = 64 * 1024 * 1024;
+
 /// Settings to apply during decoding.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DecodeSettings {
     /// Whether to reject malformed input instead of decoding it leniently.
     pub strict: bool,
@@ -74,6 +74,25 @@ pub struct DecodeSettings {
     pub target_resolution: Option<(u32, u32)>,
     /// A check for cancelling decoding.
     pub cancel: Option<CancelHandle>,
+    /// Maximum allowed image edge in pixels.
+    pub max_edge: u32,
+    /// Maximum allowed input size in bytes.
+    pub max_input: usize,
+    /// Maximum allowed decoded output size in bytes.
+    pub max_output: usize,
+}
+
+impl Default for DecodeSettings {
+    fn default() -> Self {
+        Self {
+            strict: false,
+            target_resolution: None,
+            cancel: None,
+            max_edge: DEFAULT_MAX_EDGE,
+            max_input: DEFAULT_MAX_INPUT,
+            max_output: DEFAULT_MAX_OUTPUT,
+        }
+    }
 }
 
 /// A JPEG2000 image or codestream.
@@ -86,21 +105,29 @@ pub struct Image<'a> {
 impl<'a> Image<'a> {
     /// Try to create a new JPEG2000 image from the given data.
     pub fn new(data: &'a [u8], settings: &DecodeSettings) -> Result<Self> {
+        if data.len() > settings.max_input {
+            return Err(DecodeError::TooLarge);
+        }
+
         if data.starts_with(JP2_MAGIC) {
             jp2::parse(data, settings.clone())
         } else if data.starts_with(CODESTREAM_MAGIC) {
             j2c::parse(data, settings)
         } else {
-            err!(FormatError::InvalidSignature)
+            Err(DecodeError::Malformed)
         }
     }
 
     /// Try to create a new image from a raw codestream.
     pub fn from_codestream(data: &'a [u8], settings: &DecodeSettings) -> Result<Self> {
+        if data.len() > settings.max_input {
+            return Err(DecodeError::TooLarge);
+        }
+
         if data.starts_with(CODESTREAM_MAGIC) {
             j2c::parse(data, settings)
         } else {
-            err!(FormatError::InvalidSignature)
+            Err(DecodeError::Malformed)
         }
     }
 

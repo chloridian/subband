@@ -1,4 +1,4 @@
-use subband::{DecodeError, Image, ValidationError};
+use subband::{DecodeError, Image};
 
 use crate::*;
 
@@ -41,7 +41,7 @@ fn too_few_exponents() {
     check_error(
         "errors_too_few_exponents",
         DecodeSettings::default(),
-        "not enough exponents provided in header",
+        "malformed codestream",
     );
 }
 
@@ -53,7 +53,7 @@ fn reduced_below_tile_levels() {
             target_resolution: Some((32, 24)),
             ..Default::default()
         },
-        "invalid component metadata",
+        "malformed codestream",
     );
 }
 
@@ -62,7 +62,7 @@ fn jp2_invalid_codestream() {
     check_error(
         "errors_jp2_invalid_codestream",
         DecodeSettings::default(),
-        "failed to parse COD marker",
+        "malformed codestream",
     );
 }
 
@@ -73,7 +73,7 @@ fn unsupported_bit_depth() {
         let err = Image::new(&data, &DecodeSettings::default())
             .err()
             .expect("non-8-bit sample precision should fail");
-        assert_eq!(err, DecodeError::Validation(ValidationError::Unsupported));
+        assert_eq!(err, DecodeError::Unsupported);
     }
 }
 
@@ -83,7 +83,7 @@ fn unsupported_signed_samples() {
     let err = Image::new(&data, &DecodeSettings::default())
         .err()
         .expect("signed samples should fail");
-    assert_eq!(err, DecodeError::Validation(ValidationError::Unsupported));
+    assert_eq!(err, DecodeError::Unsupported);
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn unsupported_subsampling() {
         let err = Image::new(&data, &DecodeSettings::default())
             .err()
             .expect("subsampled components should fail");
-        assert_eq!(err, DecodeError::Validation(ValidationError::Unsupported));
+        assert_eq!(err, DecodeError::Unsupported);
     }
 }
 
@@ -104,7 +104,7 @@ fn unsupported_image_offset() {
         let err = Image::new(&data, &DecodeSettings::default())
             .err()
             .expect("non-zero image offset should fail");
-        assert_eq!(err, DecodeError::Validation(ValidationError::Unsupported));
+        assert_eq!(err, DecodeError::Unsupported);
     }
 }
 
@@ -115,7 +115,7 @@ fn unsupported_tile_offset() {
         let err = Image::new(&data, &DecodeSettings::default())
             .err()
             .expect("non-zero tile offset should fail");
-        assert_eq!(err, DecodeError::Validation(ValidationError::Unsupported));
+        assert_eq!(err, DecodeError::Unsupported);
     }
 }
 
@@ -135,5 +135,65 @@ fn unsupported_component_count() {
     let err = Image::new(&data, &DecodeSettings::default())
         .err()
         .expect("more than 4 components should fail");
-    assert_eq!(err, DecodeError::Validation(ValidationError::Unsupported));
+    assert_eq!(err, DecodeError::Unsupported);
+}
+
+fn stream(name: &str) -> Vec<u8> {
+    std::fs::read(stream_path(name)).unwrap()
+}
+
+fn too_large(data: &[u8], settings: &DecodeSettings) {
+    let err = Image::new(data, settings)
+        .and_then(|image| image.decode(&mut DecoderContext::default()).map(drop))
+        .expect_err("limit should reject");
+    assert_eq!(err, DecodeError::TooLarge);
+}
+
+#[test]
+fn edge_over_limit() {
+    let data = siz_codestream(4097, 16, 0, 0, 4097, 16, 0, 0, &[(7, 1, 1)]);
+    too_large(&data, &DecodeSettings::default());
+}
+
+#[test]
+fn edge_over_custom_limit() {
+    let data = siz_codestream(65, 16, 0, 0, 65, 16, 0, 0, &[(7, 1, 1)]);
+    let settings = DecodeSettings {
+        max_edge: 64,
+        ..DecodeSettings::default()
+    };
+    too_large(&data, &settings);
+}
+
+#[test]
+fn input_over_limit() {
+    let data = stream("errors_too_few_exponents");
+    let settings = DecodeSettings {
+        max_input: data.len() - 1,
+        ..DecodeSettings::default()
+    };
+    too_large(&data, &settings);
+}
+
+#[test]
+fn output_over_limit() {
+    let data = stream("codestream_tile_size_huge");
+    let settings = DecodeSettings {
+        max_output: 128 * 96 - 1,
+        ..DecodeSettings::default()
+    };
+    too_large(&data, &settings);
+}
+
+#[test]
+fn too_many_tiles() {
+    let data = siz_codestream(4096, 4096, 0, 0, 16, 16, 0, 0, &[(7, 1, 1)]);
+    too_large(&data, &DecodeSettings::default());
+}
+
+#[test]
+fn too_many_levels() {
+    let mut data = stream("errors_too_few_exponents");
+    data[54] = 13;
+    too_large(&data, &DecodeSettings::default());
 }

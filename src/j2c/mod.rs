@@ -11,7 +11,7 @@ mod segment;
 mod tag_tree;
 mod tile;
 
-use crate::error::{FormatError, MarkerError, Result, bail};
+use crate::error::{DecodeError, Result, bail};
 use crate::j2c::codestream::markers;
 use crate::reader::BitReader;
 use crate::{DecodeSettings, Image};
@@ -57,11 +57,11 @@ pub(crate) fn parse_raw<'a>(
 
     let marker = reader.read_marker()?;
     if marker != markers::SOC {
-        bail!(MarkerError::Expected("SOC"));
+        bail!(DecodeError::Malformed);
     }
 
     let header = codestream::read_header(&mut reader, settings)?;
-    let code_stream_data = reader.tail().ok_or(FormatError::MissingCodestream)?;
+    let code_stream_data = reader.tail().ok_or(DecodeError::Malformed)?;
 
     Ok(ParsedCodestream {
         header,

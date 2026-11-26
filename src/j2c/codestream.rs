@@ -3,12 +3,36 @@ use std::vec::Vec;
 
 use super::DecodeSettings;
 use super::build::SubBandType;
-use crate::error::{MarkerError, Result, ValidationError, bail, err};
+use crate::error::{DecodeError, Result, bail};
 use crate::reader::BitReader;
 
+const MAX_TILES: u32 = 256;
+const MAX_DECOMPOSITION_LEVELS: u8 = 12;
 const MAX_LAYER_COUNT: u8 = 32;
-const MAX_RESOLUTION_COUNT: u8 = 32;
 const MAX_PRECINCT_EXPONENT: u8 = 31;
+const MAX_CODE_BLOCKS: u64 = 65_536;
+const MAX_CODE_BLOCK_LAYERS: u64 = 262_144;
+const MAX_PRECINCT_LAYERS: u64 = 65_536;
+const MAX_MARKERS: usize = 4_096;
+const MAX_MARKER_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MarkerBudget {
+    markers: usize,
+    bytes: usize,
+}
+
+impl MarkerBudget {
+    pub(crate) fn record(&mut self, segment_bytes: usize) -> Result<()> {
+        self.markers += 1;
+        self.bytes = self.bytes.saturating_add(segment_bytes);
+        if self.markers > MAX_MARKERS || self.bytes > MAX_MARKER_BYTES {
+            bail!(DecodeError::TooLarge);
+        }
+
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct Header {
@@ -19,6 +43,7 @@ pub(crate) struct Header {
     pub(crate) progression_changes: Vec<ProgressionChange>,
     pub(crate) skipped_resolution_levels: u8,
     pub(crate) strict: bool,
+    pub(crate) marker_budget: MarkerBudget,
 }
 
 #[derive(Debug, Clone)]
@@ -33,12 +58,19 @@ pub(crate) fn read_header<'a>(
     reader: &mut BitReader<'a>,
     settings: &DecodeSettings,
 ) -> Result<Header> {
+    let mut marker_budget = MarkerBudget::default();
+    marker_budget.record(0)?;
+
     if reader.read_marker()? != markers::SIZ {
-        bail!(MarkerError::Expected("SIZ"));
+        bail!(DecodeError::Malformed);
     }
 
-    let mut size_data = size_marker(reader)?;
-    size_data.num_tiles()?;
+    let siz_start = reader.offset();
+    let mut size_data = size_marker(reader, settings)?;
+    marker_budget.record(reader.offset() - siz_start)?;
+    if size_data.num_tiles()? > MAX_TILES {
+        bail!(DecodeError::TooLarge);
+    }
 
     let mut cod = None;
     let mut qcd = None;
@@ -51,72 +83,66 @@ pub(crate) fn read_header<'a>(
     let mut progression_changes = vec![];
 
     loop {
-        match reader.peek_marker().ok_or(MarkerError::Invalid)? {
-            markers::SOT => break,
+        let marker = reader.peek_marker().ok_or(DecodeError::Malformed)?;
+        if marker == markers::SOT {
+            break;
+        }
+
+        reader.read_marker()?;
+        let seg_start = reader.offset();
+
+        match marker {
             markers::COD => {
-                reader.read_marker()?;
-                cod = Some(cod_marker(reader).ok_or(MarkerError::ParseFailure("COD"))?);
+                cod = Some(cod_marker(reader)?);
             }
             markers::COC => {
-                reader.read_marker()?;
-                let (component_index, coc) =
-                    coc_marker(reader).ok_or(MarkerError::ParseFailure("COC"))?;
+                let (component_index, coc) = coc_marker(reader)?;
                 *cod_components
                     .get_mut(component_index as usize)
-                    .ok_or(MarkerError::ParseFailure("COC"))? = Some(coc);
+                    .ok_or(DecodeError::Malformed)? = Some(coc);
             }
             markers::QCD => {
-                reader.read_marker()?;
-                qcd = Some(qcd_marker(reader).ok_or(MarkerError::ParseFailure("QCD"))?);
+                qcd = Some(qcd_marker(reader).ok_or(DecodeError::Malformed)?);
             }
             markers::QCC => {
-                reader.read_marker()?;
-                let (component_index, qcc) =
-                    qcc_marker(reader).ok_or(MarkerError::ParseFailure("QCC"))?;
+                let (component_index, qcc) = qcc_marker(reader).ok_or(DecodeError::Malformed)?;
                 *qcd_components
                     .get_mut(component_index as usize)
-                    .ok_or(MarkerError::ParseFailure("QCC"))? = Some(qcc);
+                    .ok_or(DecodeError::Malformed)? = Some(qcc);
             }
             markers::RGN => {
-                reader.read_marker()?;
                 let (component_index, roi_shift) =
-                    rgn_marker(reader).ok_or(MarkerError::ParseFailure("RGN"))?;
+                    rgn_marker(reader).ok_or(DecodeError::Malformed)?;
                 *roi_shifts
                     .get_mut(component_index as usize)
-                    .ok_or(MarkerError::ParseFailure("RGN"))? = roi_shift;
+                    .ok_or(DecodeError::Malformed)? = roi_shift;
             }
             markers::TLM => {
-                reader.read_marker()?;
-                tlm_marker(reader).ok_or(MarkerError::ParseFailure("TLM"))?;
+                tlm_marker(reader).ok_or(DecodeError::Malformed)?;
             }
             markers::COM => {
-                reader.read_marker()?;
-                com_marker(reader).ok_or(MarkerError::ParseFailure("COM"))?;
+                com_marker(reader).ok_or(DecodeError::Malformed)?;
             }
             markers::PPM => {
-                reader.read_marker()?;
-                ppm_markers.push(ppm_marker(reader).ok_or(MarkerError::ParseFailure("PPM"))?);
+                ppm_markers.push(ppm_marker(reader).ok_or(DecodeError::Malformed)?);
             }
             markers::POC => {
-                reader.read_marker()?;
-                progression_changes
-                    .extend(poc_marker(reader).ok_or(MarkerError::ParseFailure("POC"))?);
+                progression_changes.extend(poc_marker(reader).ok_or(DecodeError::Malformed)?);
             }
             markers::CRG => {
-                reader.read_marker()?;
                 skip_marker_segment(reader);
             }
-            (0x30..=0x3F) => {
-                reader.read_marker()?;
-            }
+            (0x30..=0x3F) => {}
             _ => {
-                bail!(MarkerError::Unsupported);
+                bail!(DecodeError::Unsupported);
             }
         }
+
+        marker_budget.record(reader.offset() - seg_start)?;
     }
 
-    let cod = cod.ok_or(MarkerError::Missing("COD"))?;
-    let qcd = qcd.ok_or(MarkerError::Missing("QCD"))?;
+    let cod = cod.ok_or(DecodeError::Malformed)?;
+    let qcd = qcd.ok_or(DecodeError::Malformed)?;
 
     let component_infos: Vec<ComponentInfo> = (0..num_components as usize)
         .map(|idx| ComponentInfo {
@@ -132,6 +158,8 @@ pub(crate) fn read_header<'a>(
             roi_shift: roi_shifts[idx],
         })
         .collect();
+
+    validate_resource_limits(&size_data, &component_infos, cod.num_layers)?;
 
     let min_num_resolution_levels = component_infos
         .iter()
@@ -159,7 +187,14 @@ pub(crate) fn read_header<'a>(
 
     size_data.resolution_shrink_factor *= 1 << skipped_resolution_levels;
 
-    let ppm_packets = ppm_packets(ppm_markers).ok_or(MarkerError::ParseFailure("PPM"))?;
+    let output_bytes = u64::from(size_data.image_width())
+        .saturating_mul(u64::from(size_data.image_height()))
+        .saturating_mul(u64::from(size_data.num_components));
+    if output_bytes > settings.max_output as u64 {
+        bail!(DecodeError::TooLarge);
+    }
+
+    let ppm_packets = ppm_packets(ppm_markers).ok_or(DecodeError::Malformed)?;
 
     let header = Header {
         size_data,
@@ -169,11 +204,63 @@ pub(crate) fn read_header<'a>(
         progression_changes,
         skipped_resolution_levels,
         strict: settings.strict,
+        marker_budget,
     };
 
     validate(&header)?;
 
     Ok(header)
+}
+
+pub(crate) fn validate_resource_limits(
+    size_data: &SizeData,
+    component_infos: &[ComponentInfo],
+    num_layers: u8,
+) -> Result<()> {
+    let layers = u64::from(num_layers);
+    let mut total_code_blocks = 0_u64;
+    let mut total_precincts = 0_u64;
+
+    for info in component_infos {
+        let params = &info.coding_style.parameters;
+        let n_l = params.num_decomposition_levels;
+
+        for r in 0..=n_l {
+            let shift = u32::from(n_l - r);
+            let w_r = u64::from(size_data.reference_grid_width).div_ceil(1_u64 << shift);
+            let h_r = u64::from(size_data.reference_grid_height).div_ceil(1_u64 << shift);
+            let (ppx, ppy) = params.precinct_exponents[r as usize];
+
+            let precincts_r = w_r
+                .div_ceil(1_u64 << ppx)
+                .saturating_mul(h_r.div_ceil(1_u64 << ppy));
+            total_precincts = total_precincts.saturating_add(precincts_r);
+
+            if r == 0 {
+                let cbw = 1_u64 << params.code_block_width.min(ppx);
+                let cbh = 1_u64 << params.code_block_height.min(ppy);
+                let cbs = (w_r.div_ceil(cbw) + 1).saturating_mul(h_r.div_ceil(cbh) + 1);
+                total_code_blocks = total_code_blocks.saturating_add(cbs);
+            } else {
+                let cbw = 1_u64 << params.code_block_width.min(ppx.saturating_sub(1));
+                let cbh = 1_u64 << params.code_block_height.min(ppy.saturating_sub(1));
+                let bw = w_r.div_ceil(2);
+                let bh = h_r.div_ceil(2);
+                let cbs_per_band = (bw.div_ceil(cbw) + 1).saturating_mul(bh.div_ceil(cbh) + 1);
+                total_code_blocks =
+                    total_code_blocks.saturating_add(cbs_per_band.saturating_mul(3));
+            }
+        }
+    }
+
+    if total_code_blocks > MAX_CODE_BLOCKS
+        || total_code_blocks.saturating_mul(layers) > MAX_CODE_BLOCK_LAYERS
+        || total_precincts.saturating_mul(layers) > MAX_PRECINCT_LAYERS
+    {
+        bail!(DecodeError::TooLarge);
+    }
+
+    Ok(())
 }
 
 fn validate(header: &Header) -> Result<()> {
@@ -183,18 +270,17 @@ fn validate(header: &Header) -> Result<()> {
         let num_precinct_exponents = info.quantization_info.step_sizes.len();
 
         if num_precinct_exponents == 0 {
-            bail!(ValidationError::MissingPrecinctExponents);
+            bail!(DecodeError::Malformed);
         } else if matches!(
             quantization_style,
             QuantizationStyle::NoQuantization | QuantizationStyle::ScalarExpounded
         ) {
-            // Must cover the largest index accessed in `exponent_mantissa`.
             if max_resolution_idx == 0 {
                 if num_precinct_exponents == 0 {
-                    bail!(ValidationError::InsufficientExponents);
+                    bail!(DecodeError::Malformed);
                 }
             } else if 1 + (max_resolution_idx as usize - 1) * 3 + 2 >= num_precinct_exponents {
-                bail!(ValidationError::InsufficientExponents);
+                bail!(DecodeError::Malformed);
             }
         }
     }
@@ -234,15 +320,15 @@ impl ComponentInfo {
                     step_sizes.get(1 + (resolution as usize - 1) * 3 + sb_index as usize)
                 };
 
-                Ok(entry
+                entry
                     .map(|s| (s.exponent, s.mantissa))
-                    .ok_or(ValidationError::MissingStepSize)?)
+                    .ok_or(DecodeError::Malformed)
             }
             QuantizationStyle::ScalarDerived => {
                 let (e_0, mantissa) = step_sizes
                     .first()
                     .map(|s| (s.exponent, s.mantissa))
-                    .ok_or(ValidationError::MissingStepSize)?;
+                    .ok_or(DecodeError::Malformed)?;
                 let n_b = if resolution == 0 {
                     n_ll as u16
                 } else {
@@ -252,7 +338,7 @@ impl ComponentInfo {
                 let exponent = e_0
                     .checked_sub(n_ll as u16)
                     .and_then(|e| e.checked_add(n_b))
-                    .ok_or(ValidationError::InvalidExponents)?;
+                    .ok_or(DecodeError::Malformed)?;
 
                 Ok((exponent, mantissa))
             }
@@ -293,7 +379,7 @@ impl ProgressionOrder {
             2 => Ok(Self::ResolutionPositionComponentLayer),
             3 => Ok(Self::PositionComponentResolutionLayer),
             4 => Ok(Self::ComponentPositionResolutionLayer),
-            _ => err!(ValidationError::InvalidProgressionOrder),
+            _ => Err(DecodeError::Malformed),
         }
     }
 }
@@ -319,7 +405,7 @@ impl WaveletTransform {
         match value {
             0 => Ok(Self::Irreversible97),
             1 => Ok(Self::Reversible53),
-            _ => err!(ValidationError::InvalidTransformation),
+            _ => Err(DecodeError::Malformed),
         }
     }
 }
@@ -381,7 +467,7 @@ impl QuantizationStyle {
             0 => Ok(Self::NoQuantization),
             1 => Ok(Self::ScalarDerived),
             2 => Ok(Self::ScalarExpounded),
-            _ => err!(ValidationError::InvalidQuantizationStyle),
+            _ => Err(DecodeError::Malformed),
         }
     }
 }
@@ -455,7 +541,7 @@ impl SizeData {
         let tile_count = self
             .num_x_tiles()
             .checked_mul(self.num_y_tiles())
-            .ok_or(ValidationError::ImageTooLarge)?;
+            .ok_or(DecodeError::TooLarge)?;
 
         Ok(tile_count)
     }
@@ -471,54 +557,47 @@ impl SizeData {
     }
 }
 
-fn size_marker(reader: &mut BitReader<'_>) -> Result<SizeData> {
-    let _ = reader.read_u16().ok_or(MarkerError::ParseFailure("SIZ"))?;
-    let _ = reader.read_u16().ok_or(MarkerError::ParseFailure("SIZ"))?;
+fn size_marker(reader: &mut BitReader<'_>, settings: &DecodeSettings) -> Result<SizeData> {
+    let lsiz = reader.read_u16().ok_or(DecodeError::Malformed)?;
+    let _ = reader.read_u16().ok_or(DecodeError::Malformed)?;
 
-    let xsiz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
-    let ysiz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
-    let x_osiz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
-    let y_osiz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
-    let xt_siz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
-    let yt_siz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
-    let xto_siz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
-    let yto_siz = reader.read_u32().ok_or(MarkerError::ParseFailure("SIZ"))?;
-    let csiz = reader.read_u16().ok_or(MarkerError::ParseFailure("SIZ"))?;
+    let xsiz = reader.read_u32().ok_or(DecodeError::Malformed)?;
+    let ysiz = reader.read_u32().ok_or(DecodeError::Malformed)?;
+    let x_osiz = reader.read_u32().ok_or(DecodeError::Malformed)?;
+    let y_osiz = reader.read_u32().ok_or(DecodeError::Malformed)?;
+    let xt_siz = reader.read_u32().ok_or(DecodeError::Malformed)?;
+    let yt_siz = reader.read_u32().ok_or(DecodeError::Malformed)?;
+    let xto_siz = reader.read_u32().ok_or(DecodeError::Malformed)?;
+    let yto_siz = reader.read_u32().ok_or(DecodeError::Malformed)?;
+    let csiz = reader.read_u16().ok_or(DecodeError::Malformed)?;
+
+    if u32::from(lsiz) != 38 + 3 * u32::from(csiz) {
+        bail!(DecodeError::Malformed);
+    }
+
+    if !(1..=4).contains(&csiz) {
+        bail!(DecodeError::Unsupported);
+    }
 
     if xsiz == 0 || ysiz == 0 || xt_siz == 0 || yt_siz == 0 {
-        bail!(ValidationError::InvalidDimensions);
+        bail!(DecodeError::Malformed);
     }
 
-    if x_osiz >= xsiz || y_osiz >= ysiz || xto_siz >= xsiz || yto_siz >= ysiz {
-        bail!(ValidationError::InvalidDimensions);
-    }
-
-    if csiz == 0 {
-        bail!(MarkerError::ParseFailure("SIZ"));
-    }
-
-    if csiz > 4 {
-        bail!(ValidationError::Unsupported);
+    if xsiz > settings.max_edge || ysiz > settings.max_edge {
+        bail!(DecodeError::TooLarge);
     }
 
     if x_osiz != 0 || y_osiz != 0 || xto_siz != 0 || yto_siz != 0 {
-        bail!(ValidationError::Unsupported);
+        bail!(DecodeError::Unsupported);
     }
 
     for _ in 0..csiz {
-        let ssiz = reader.read_byte().ok_or(MarkerError::ParseFailure("SIZ"))?;
-        let x_rsiz = reader.read_byte().ok_or(MarkerError::ParseFailure("SIZ"))?;
-        let y_rsiz = reader.read_byte().ok_or(MarkerError::ParseFailure("SIZ"))?;
+        let ssiz = reader.read_byte().ok_or(DecodeError::Malformed)?;
+        let x_rsiz = reader.read_byte().ok_or(DecodeError::Malformed)?;
+        let y_rsiz = reader.read_byte().ok_or(DecodeError::Malformed)?;
 
-        if x_rsiz == 0 || y_rsiz == 0 {
-            bail!(ValidationError::InvalidComponentMetadata);
-        }
-
-        let precision = (ssiz & 0x7F) + 1;
-        let is_signed = (ssiz & 0x80) != 0;
-
-        if is_signed || precision != 8 || x_rsiz != 1 || y_rsiz != 1 {
-            bail!(ValidationError::Unsupported);
+        if ssiz != 7 || x_rsiz != 1 || y_rsiz != 1 {
+            bail!(DecodeError::Unsupported);
         }
     }
 
@@ -535,34 +614,44 @@ fn size_marker(reader: &mut BitReader<'_>) -> Result<SizeData> {
 fn coding_style_parameters(
     reader: &mut BitReader<'_>,
     coding_style: &CodingStyleFlags,
-) -> Option<CodingStyleParameters> {
-    let num_decomposition_levels = reader.read_byte()?;
+) -> Result<CodingStyleParameters> {
+    let num_decomposition_levels = reader.read_byte().ok_or(DecodeError::Malformed)?;
 
-    if num_decomposition_levels > MAX_RESOLUTION_COUNT {
-        return None;
+    if num_decomposition_levels > MAX_DECOMPOSITION_LEVELS {
+        bail!(DecodeError::TooLarge);
     }
 
-    let num_resolution_levels = num_decomposition_levels.checked_add(1)?;
-    let code_block_width = reader.read_byte()?.checked_add(2)?;
-    let code_block_height = reader.read_byte()?.checked_add(2)?;
+    let num_resolution_levels = num_decomposition_levels
+        .checked_add(1)
+        .ok_or(DecodeError::Malformed)?;
+    let code_block_width = reader
+        .read_byte()
+        .and_then(|v| v.checked_add(2))
+        .ok_or(DecodeError::Malformed)?;
+    let code_block_height = reader
+        .read_byte()
+        .and_then(|v| v.checked_add(2))
+        .ok_or(DecodeError::Malformed)?;
 
     if code_block_width > 10 || code_block_height > 10 || code_block_width + code_block_height > 12
     {
-        return None;
+        bail!(DecodeError::Malformed);
     }
 
-    let code_block_style = CodeBlockStyle::from_u8(reader.read_byte()?);
-    let transformation = WaveletTransform::from_u8(reader.read_byte()?).ok()?;
+    let code_block_style =
+        CodeBlockStyle::from_u8(reader.read_byte().ok_or(DecodeError::Malformed)?);
+    let transformation =
+        WaveletTransform::from_u8(reader.read_byte().ok_or(DecodeError::Malformed)?)?;
 
     let mut precinct_exponents = Vec::new();
     if coding_style.has_precincts() {
         for _ in 0..num_resolution_levels {
-            let precinct_size = reader.read_byte()?;
+            let precinct_size = reader.read_byte().ok_or(DecodeError::Malformed)?;
             let width_exp = precinct_size & 0xF;
             let height_exp = precinct_size >> 4;
 
             if width_exp > MAX_PRECINCT_EXPONENT || height_exp > MAX_PRECINCT_EXPONENT {
-                return None;
+                bail!(DecodeError::Malformed);
             }
 
             precinct_exponents.push((width_exp, height_exp));
@@ -573,7 +662,7 @@ fn coding_style_parameters(
         }
     }
 
-    Some(CodingStyleParameters {
+    Ok(CodingStyleParameters {
         num_decomposition_levels,
         num_resolution_levels,
         code_block_width,
@@ -637,23 +726,29 @@ pub(crate) fn skip_marker_segment(reader: &mut BitReader<'_>) -> Option<()> {
     Some(())
 }
 
-pub(crate) fn cod_marker(reader: &mut BitReader<'_>) -> Option<CodingStyleDefault> {
-    let _ = reader.read_u16()?;
+pub(crate) fn cod_marker(reader: &mut BitReader<'_>) -> Result<CodingStyleDefault> {
+    let _ = reader.read_u16().ok_or(DecodeError::Malformed)?;
 
-    let coding_style_flags = CodingStyleFlags::from_u8(reader.read_byte()?);
-    let progression_order = ProgressionOrder::from_u8(reader.read_byte()?).ok()?;
+    let coding_style_flags =
+        CodingStyleFlags::from_u8(reader.read_byte().ok_or(DecodeError::Malformed)?);
+    let progression_order =
+        ProgressionOrder::from_u8(reader.read_byte().ok_or(DecodeError::Malformed)?)?;
 
-    let num_layers = reader.read_u16()?;
+    let num_layers = reader.read_u16().ok_or(DecodeError::Malformed)?;
 
-    if num_layers == 0 || num_layers > MAX_LAYER_COUNT as u16 {
-        return None;
+    if num_layers == 0 {
+        bail!(DecodeError::Malformed);
     }
 
-    let mct = reader.read_byte()? == 1;
+    if num_layers > u16::from(MAX_LAYER_COUNT) {
+        bail!(DecodeError::TooLarge);
+    }
+
+    let mct = reader.read_byte().ok_or(DecodeError::Malformed)? == 1;
 
     let coding_style_parameters = coding_style_parameters(reader, &coding_style_flags)?;
 
-    Some(CodingStyleDefault {
+    Ok(CodingStyleDefault {
         progression_order,
         num_layers: num_layers as u8,
         mct,
@@ -664,11 +759,11 @@ pub(crate) fn cod_marker(reader: &mut BitReader<'_>) -> Option<CodingStyleDefaul
     })
 }
 
-pub(crate) fn coc_marker(reader: &mut BitReader<'_>) -> Option<(u16, CodingStyleComponent)> {
-    let _ = reader.read_u16()?;
+pub(crate) fn coc_marker(reader: &mut BitReader<'_>) -> Result<(u16, CodingStyleComponent)> {
+    let _ = reader.read_u16().ok_or(DecodeError::Malformed)?;
 
-    let component_index = u16::from(reader.read_byte()?);
-    let coding_style = CodingStyleFlags::from_u8(reader.read_byte()?);
+    let component_index = u16::from(reader.read_byte().ok_or(DecodeError::Malformed)?);
+    let coding_style = CodingStyleFlags::from_u8(reader.read_byte().ok_or(DecodeError::Malformed)?);
 
     let parameters = coding_style_parameters(reader, &coding_style)?;
 
@@ -677,7 +772,7 @@ pub(crate) fn coc_marker(reader: &mut BitReader<'_>) -> Option<(u16, CodingStyle
         parameters,
     };
 
-    Some((component_index, coc))
+    Ok((component_index, coc))
 }
 
 pub(crate) fn poc_marker(reader: &mut BitReader<'_>) -> Option<Vec<ProgressionChange>> {

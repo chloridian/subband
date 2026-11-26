@@ -67,7 +67,7 @@ fn run(bencher: Bencher<'_, '_>, data: &[u8], strict: bool, discard: u32) {
             image.width().div_ceil(1 << discard),
             image.height().div_ceil(1 << discard),
         )),
-        cancel: None,
+        ..DecodeSettings::default()
     };
     bencher.bench_local(|| {
         let image = Image::from_codestream(black_box(data), &settings).unwrap();

@@ -7,7 +7,7 @@ use super::decode::DecompositionStorage;
 use super::progression::ProgressionData;
 use super::tile::{Tile, TilePart};
 use crate::cancel::Cancel;
-use crate::error::{Result, TileError, bail};
+use crate::error::{DecodeError, Result, bail};
 use crate::reader::BitReader;
 
 pub(crate) const MAX_BITPLANE_COUNT: u8 = 32;
@@ -30,7 +30,7 @@ pub(crate) fn parse<'a, 'b>(
         .is_none()
             && header.strict
         {
-            bail!(TileError::Invalid);
+            bail!(DecodeError::Malformed);
         }
     }
 
