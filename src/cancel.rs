@@ -1,8 +1,8 @@
-use crate::error::{Cancelled, Result};
 use core::fmt;
-use core::result;
 use std::sync::Arc;
 use std::vec::Vec;
+
+use crate::error::{DecodeError, Result};
 
 pub trait CancelCheck: Send + Sync {
     fn is_cancelled(&self) -> bool;
@@ -46,9 +46,9 @@ impl Cancel<'_> {
     }
 
     #[inline(always)]
-    pub(crate) fn check(self) -> result::Result<(), Cancelled> {
+    pub(crate) fn check(self) -> Result<()> {
         if self.is_cancelled() {
-            Err(Cancelled)
+            Err(DecodeError::Cancelled)
         } else {
             Ok(())
         }

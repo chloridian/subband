@@ -8,10 +8,8 @@ pub enum DecodeError {
     TooLarge,
     Malformed,
     Cancelled,
+    BufferSize,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cancelled;
 
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -19,25 +17,13 @@ impl fmt::Display for DecodeError {
             Self::Unsupported => write!(f, "unsupported codestream"),
             Self::TooLarge => write!(f, "image is too large"),
             Self::Malformed => write!(f, "malformed codestream"),
-            Self::Cancelled => write!(f, "{Cancelled}"),
+            Self::Cancelled => write!(f, "decoding was cancelled"),
+            Self::BufferSize => write!(f, "output buffer has the wrong size"),
         }
     }
 }
 
-impl fmt::Display for Cancelled {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "decoding was cancelled")
-    }
-}
-
 impl Error for DecodeError {}
-impl Error for Cancelled {}
-
-impl From<Cancelled> for DecodeError {
-    fn from(_: Cancelled) -> Self {
-        Self::Cancelled
-    }
-}
 
 pub type Result<T> = result::Result<T, DecodeError>;
 
