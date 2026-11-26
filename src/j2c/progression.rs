@@ -1,4 +1,4 @@
-use std::boxed::Box;
+use core::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::vec;
 use std::vec::Vec;
@@ -6,8 +6,6 @@ use std::vec::Vec;
 use super::codestream::{Header, ProgressionOrder};
 use super::tile::{ComponentTile, ResolutionTile, Tile};
 use crate::error::{DecodeError, Result};
-use core::cmp::Ordering;
-use core::iter;
 
 #[derive(Default, Copy, Clone, Debug, PartialEq, Hash, Eq, PartialOrd, Ord)]
 pub(crate) struct ProgressionData {
@@ -19,30 +17,32 @@ pub(crate) struct ProgressionData {
 
 pub(crate) struct IteratorInput<'a> {
     layers: (u8, u8),
-    tile: &'a Tile<'a>,
+    tile: &'a Tile,
+    header: &'a Header,
     resolutions: (u8, u8),
     components: (u8, u8),
 }
 
 impl<'a> IteratorInput<'a> {
-    pub(crate) fn new(tile: &'a Tile<'a>) -> Self {
-        Self::new_with_custom_bounds(tile, (0, u8::MAX), (0, u8::MAX), (0, u8::MAX))
+    pub(crate) fn new(tile: &'a Tile, header: &'a Header) -> Self {
+        Self::new_with_custom_bounds(tile, header, (0, u8::MAX), (0, u8::MAX), (0, u8::MAX))
     }
 
     pub(crate) fn new_with_custom_bounds(
-        tile: &'a Tile<'a>,
+        tile: &'a Tile,
+        header: &'a Header,
         mut resolutions: (u8, u8),
         mut layers: (u8, u8),
         mut components: (u8, u8),
     ) -> Self {
-        let max_resolution = tile
-            .component_infos
+        let component_infos = tile.component_infos(header);
+        let max_resolution = component_infos
             .iter()
             .map(|c| c.coding_style.parameters.num_resolution_levels)
             .max()
             .unwrap_or(0);
         let max_layer = tile.num_layers;
-        let max_component = tile.component_infos.len() as u8;
+        let max_component = component_infos.len() as u8;
 
         resolutions.1 = resolutions.1.min(max_resolution);
         layers.1 = layers.1.min(max_layer);
@@ -51,6 +51,7 @@ impl<'a> IteratorInput<'a> {
         Self {
             layers,
             tile,
+            header,
             resolutions,
             components,
         }
@@ -74,7 +75,7 @@ impl<'a> IteratorInput<'a> {
 
     fn max_resolution(&self, component_idx: u8) -> u8 {
         self.tile
-            .component_infos
+            .component_infos(self.header)
             .get(component_idx as usize)
             .map_or(0, |c| {
                 self.total_max_resolution().min(c.num_resolution_levels())
@@ -95,193 +96,148 @@ impl<'a> IteratorInput<'a> {
             || self.components.0 >= self.components.1
     }
 
-    fn component_tiles(&self) -> Vec<ComponentTile<'a>> {
-        self.tile
-            .component_infos
-            .iter()
-            .map(|c| ComponentTile::new(self.tile, c))
-            .collect::<Vec<_>>()
-    }
-
-    fn num_precincts(
-        &self,
-        component_tiles: &[ComponentTile<'a>],
-        component_idx: u8,
-        resolution: u8,
-    ) -> u64 {
+    fn num_precincts(&self, component_idx: u8, resolution: u8) -> u64 {
         if component_idx >= self.max_comp() || resolution >= self.max_resolution(component_idx) {
             return 0;
         }
 
-        let Some(&component_tile) = component_tiles.get(component_idx as usize) else {
+        let Some(component_info) = self
+            .tile
+            .component_infos(self.header)
+            .get(component_idx as usize)
+        else {
             return 0;
         };
 
+        let component_tile = ComponentTile::new(self.tile, component_info);
         ResolutionTile::new(component_tile, resolution).num_precincts()
     }
 }
 
-pub(crate) fn progression_iterator<'a>(
-    tile: &'a Tile<'a>,
-    header: &Header,
-) -> Result<Box<dyn Iterator<Item = ProgressionData> + 'a>> {
-    let progression_changes = if tile.progression_changes.is_empty() {
-        &header.progression_changes
-    } else {
-        &tile.progression_changes
-    };
+pub(crate) enum ProgressionIterator<'a> {
+    Lrcp(OrderIterator<'a>),
+    Rlcp(OrderIterator<'a>),
+    Position(PositionIterator),
+    Poc(PocIterator<'a>),
+}
 
-    if progression_changes.is_empty() {
-        return progression_order_iterator(IteratorInput::new(tile), tile.progression_order);
+impl Iterator for ProgressionIterator<'_> {
+    type Item = ProgressionData;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Lrcp(iter) => iter.next_lrcp(),
+            Self::Rlcp(iter) => iter.next_rlcp(),
+            Self::Position(iter) => iter.next(),
+            Self::Poc(iter) => iter.next(),
+        }
+    }
+}
+
+pub(crate) struct OrderIterator<'a> {
+    input: IteratorInput<'a>,
+    layer: u8,
+    resolution: u8,
+    component_idx: u8,
+    num_precincts: u64,
+    precinct: u64,
+}
+
+impl<'a> OrderIterator<'a> {
+    fn new(input: IteratorInput<'a>) -> Self {
+        let layer = input.min_layer();
+        let resolution = input.min_resolution();
+        let component_idx = input.min_comp();
+        let num_precincts = input.num_precincts(component_idx, resolution);
+        Self {
+            input,
+            layer,
+            resolution,
+            component_idx,
+            num_precincts,
+            precinct: 0,
+        }
     }
 
-    let clamp = |value: u16| u8::try_from(value).unwrap_or(u8::MAX);
-
-    let iterators = progression_changes
-        .iter()
-        .map(|change| {
-            let input = IteratorInput::new_with_custom_bounds(
-                tile,
-                (change.resolution_start, change.resolution_end),
-                (0, clamp(change.layer_end)),
-                (clamp(change.component_start), clamp(change.component_end)),
-            );
-
-            progression_order_iterator(input, change.progression_order)
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut included = BTreeSet::new();
-
-    Ok(Box::new(
-        iterators
-            .into_iter()
-            .flatten()
-            .filter(move |data| included.insert(*data)),
-    ))
-}
-
-fn progression_order_iterator<'a>(
-    input: IteratorInput<'a>,
-    progression_order: ProgressionOrder,
-) -> Result<Box<dyn Iterator<Item = ProgressionData> + 'a>> {
-    Ok(match progression_order {
-        ProgressionOrder::LayerResolutionComponentPosition => {
-            Box::new(layer_resolution_component_position_progression(input))
-        }
-        ProgressionOrder::ResolutionLayerComponentPosition => {
-            Box::new(resolution_layer_component_position_progression(input))
-        }
-        ProgressionOrder::ResolutionPositionComponentLayer => Box::new(
-            resolution_position_component_layer_progression(input).ok_or(DecodeError::Malformed)?,
-        ),
-        ProgressionOrder::PositionComponentResolutionLayer => Box::new(
-            position_component_resolution_layer_progression(input).ok_or(DecodeError::Malformed)?,
-        ),
-        ProgressionOrder::ComponentPositionResolutionLayer => Box::new(
-            component_position_resolution_layer_progression(input).ok_or(DecodeError::Malformed)?,
-        ),
-    })
-}
-
-pub(crate) fn layer_resolution_component_position_progression<'a>(
-    input: IteratorInput<'a>,
-) -> impl Iterator<Item = ProgressionData> + 'a {
-    let component_tiles = input.component_tiles();
-
-    let mut layer = input.min_layer();
-    let mut resolution = input.min_resolution();
-    let mut component_idx = input.min_comp();
-    let mut num_precincts = input.num_precincts(&component_tiles, component_idx, resolution);
-    let mut precinct = 0;
-
-    iter::from_fn(move || {
-        if input.is_empty() || layer >= input.max_layer() {
+    fn next_lrcp(&mut self) -> Option<ProgressionData> {
+        if self.input.is_empty() || self.layer >= self.input.max_layer() {
             return None;
         }
 
-        while precinct == num_precincts {
-            precinct = 0;
-            component_idx += 1;
+        while self.precinct == self.num_precincts {
+            self.precinct = 0;
+            self.component_idx += 1;
 
-            if component_idx == input.max_comp() {
-                component_idx = input.min_comp();
-                resolution += 1;
+            if self.component_idx == self.input.max_comp() {
+                self.component_idx = self.input.min_comp();
+                self.resolution += 1;
 
-                if resolution == input.total_max_resolution() {
-                    resolution = input.min_resolution();
-                    layer += 1;
+                if self.resolution == self.input.total_max_resolution() {
+                    self.resolution = self.input.min_resolution();
+                    self.layer += 1;
 
-                    if layer == input.max_layer() {
+                    if self.layer == self.input.max_layer() {
                         return None;
                     }
                 }
             }
 
-            num_precincts = input.num_precincts(&component_tiles, component_idx, resolution);
+            self.num_precincts = self
+                .input
+                .num_precincts(self.component_idx, self.resolution);
         }
 
         let data = ProgressionData {
-            layer_num: layer,
-            resolution,
-            component: component_idx,
-            precinct,
+            layer_num: self.layer,
+            resolution: self.resolution,
+            component: self.component_idx,
+            precinct: self.precinct,
         };
 
-        precinct += 1;
+        self.precinct += 1;
 
         Some(data)
-    })
-}
+    }
 
-pub(crate) fn resolution_layer_component_position_progression<'a>(
-    input: IteratorInput<'a>,
-) -> impl Iterator<Item = ProgressionData> + 'a {
-    let component_tiles = input.component_tiles();
-
-    let mut layer = input.min_layer();
-    let mut resolution = input.min_resolution();
-    let mut component_idx = input.min_comp();
-    let mut num_precincts = input.num_precincts(&component_tiles, component_idx, resolution);
-    let mut precinct = 0;
-
-    iter::from_fn(move || {
-        if input.is_empty() || resolution >= input.total_max_resolution() {
+    fn next_rlcp(&mut self) -> Option<ProgressionData> {
+        if self.input.is_empty() || self.resolution >= self.input.total_max_resolution() {
             return None;
         }
 
-        while precinct == num_precincts {
-            precinct = 0;
-            component_idx += 1;
+        while self.precinct == self.num_precincts {
+            self.precinct = 0;
+            self.component_idx += 1;
 
-            if component_idx == input.max_comp() {
-                component_idx = input.min_comp();
-                layer += 1;
+            if self.component_idx == self.input.max_comp() {
+                self.component_idx = self.input.min_comp();
+                self.layer += 1;
 
-                if layer == input.max_layer() {
-                    layer = input.min_layer();
-                    resolution += 1;
+                if self.layer == self.input.max_layer() {
+                    self.layer = self.input.min_layer();
+                    self.resolution += 1;
 
-                    if resolution == input.total_max_resolution() {
+                    if self.resolution == self.input.total_max_resolution() {
                         return None;
                     }
                 }
             }
 
-            num_precincts = input.num_precincts(&component_tiles, component_idx, resolution);
+            self.num_precincts = self
+                .input
+                .num_precincts(self.component_idx, self.resolution);
         }
 
         let data = ProgressionData {
-            layer_num: layer,
-            resolution,
-            component: component_idx,
-            precinct,
+            layer_num: self.layer,
+            resolution: self.resolution,
+            component: self.component_idx,
+            precinct: self.precinct,
         };
 
-        precinct += 1;
+        self.precinct += 1;
 
         Some(data)
-    })
+    }
 }
 
 struct PrecinctStore {
@@ -292,15 +248,162 @@ struct PrecinctStore {
     precinct_idx: u64,
 }
 
-fn position_progression_common<'a>(
+pub(crate) struct PositionIterator {
+    elements: Vec<PrecinctStore>,
+    idx: usize,
+    layer: u8,
+    min_layer: u8,
+    max_layer: u8,
+}
+
+impl Iterator for PositionIterator {
+    type Item = ProgressionData;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.min_layer >= self.max_layer {
+            return None;
+        }
+
+        let element = self.elements.get(self.idx)?;
+        let data = ProgressionData {
+            layer_num: self.layer,
+            resolution: element.resolution,
+            component: element.component_idx,
+            precinct: element.precinct_idx,
+        };
+
+        self.layer += 1;
+        if self.layer == self.max_layer {
+            self.layer = self.min_layer;
+            self.idx += 1;
+        }
+
+        Some(data)
+    }
+}
+
+pub(crate) struct PocIterator<'a> {
+    iterators: Vec<ProgressionIterator<'a>>,
+    current: usize,
+    included: BTreeSet<ProgressionData>,
+}
+
+impl Iterator for PocIterator<'_> {
+    type Item = ProgressionData;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(iter) = self.iterators.get_mut(self.current) {
+            if let Some(data) = iter.next() {
+                if self.included.insert(data) {
+                    return Some(data);
+                }
+            } else {
+                self.current += 1;
+            }
+        }
+
+        None
+    }
+}
+
+pub(crate) fn progression_iterator<'a>(
+    tile: &'a Tile,
+    header: &'a Header,
+) -> Result<ProgressionIterator<'a>> {
+    let progression_changes = if tile.progression_changes.is_empty() {
+        &header.progression_changes
+    } else {
+        &tile.progression_changes
+    };
+
+    if progression_changes.is_empty() {
+        return progression_order_iterator(
+            IteratorInput::new(tile, header),
+            tile.progression_order,
+        );
+    }
+
+    let clamp = |value: u16| u8::try_from(value).unwrap_or(u8::MAX);
+
+    let iterators = progression_changes
+        .iter()
+        .map(|change| {
+            let input = IteratorInput::new_with_custom_bounds(
+                tile,
+                header,
+                (change.resolution_start, change.resolution_end),
+                (0, clamp(change.layer_end)),
+                (clamp(change.component_start), clamp(change.component_end)),
+            );
+
+            progression_order_iterator(input, change.progression_order)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(ProgressionIterator::Poc(PocIterator {
+        iterators,
+        current: 0,
+        included: BTreeSet::new(),
+    }))
+}
+
+fn progression_order_iterator<'a>(
     input: IteratorInput<'a>,
+    progression_order: ProgressionOrder,
+) -> Result<ProgressionIterator<'a>> {
+    Ok(match progression_order {
+        ProgressionOrder::LayerResolutionComponentPosition => {
+            ProgressionIterator::Lrcp(OrderIterator::new(input))
+        }
+        ProgressionOrder::ResolutionLayerComponentPosition => {
+            ProgressionIterator::Rlcp(OrderIterator::new(input))
+        }
+        ProgressionOrder::ResolutionPositionComponentLayer => ProgressionIterator::Position(
+            position_progression_common(input, |p, s| {
+                p.resolution
+                    .cmp(&s.resolution)
+                    .then_with(|| p.precinct_y.cmp(&s.precinct_y))
+                    .then_with(|| p.precinct_x.cmp(&s.precinct_x))
+                    .then_with(|| p.component_idx.cmp(&s.component_idx))
+                    .then_with(|| p.precinct_idx.cmp(&s.precinct_idx))
+            })
+            .ok_or(DecodeError::Malformed)?,
+        ),
+        ProgressionOrder::PositionComponentResolutionLayer => ProgressionIterator::Position(
+            position_progression_common(input, |p, s| {
+                p.precinct_y
+                    .cmp(&s.precinct_y)
+                    .then_with(|| p.precinct_x.cmp(&s.precinct_x))
+                    .then_with(|| p.component_idx.cmp(&s.component_idx))
+                    .then_with(|| p.resolution.cmp(&s.resolution))
+                    .then_with(|| p.precinct_idx.cmp(&s.precinct_idx))
+            })
+            .ok_or(DecodeError::Malformed)?,
+        ),
+        ProgressionOrder::ComponentPositionResolutionLayer => ProgressionIterator::Position(
+            position_progression_common(input, |p, s| {
+                p.component_idx
+                    .cmp(&s.component_idx)
+                    .then_with(|| p.precinct_y.cmp(&s.precinct_y))
+                    .then_with(|| p.precinct_x.cmp(&s.precinct_x))
+                    .then_with(|| p.resolution.cmp(&s.resolution))
+                    .then_with(|| p.precinct_idx.cmp(&s.precinct_idx))
+            })
+            .ok_or(DecodeError::Malformed)?,
+        ),
+    })
+}
+
+fn position_progression_common(
+    input: IteratorInput<'_>,
     sort: impl FnMut(&PrecinctStore, &PrecinctStore) -> Ordering,
-) -> Option<impl Iterator<Item = ProgressionData> + 'a> {
-    let component_tiles = input.component_tiles();
+) -> Option<PositionIterator> {
+    let component_infos = input.tile.component_infos(input.header);
     let mut elements = vec![];
 
     for component_idx in input.min_comp()..input.max_comp() {
-        let component_tile = *component_tiles.get(component_idx as usize)?;
+        let component_info = component_infos.get(component_idx as usize)?;
+        let component_tile = ComponentTile::new(input.tile, component_info);
 
         for resolution in input.min_resolution()..input.max_resolution(component_idx) {
             let resolution_tile = ResolutionTile::new(component_tile, resolution);
@@ -317,51 +420,11 @@ fn position_progression_common<'a>(
 
     elements.sort_by(sort);
 
-    Some(elements.into_iter().flat_map(move |e| {
-        (input.min_layer()..input.max_layer()).map(move |layer| ProgressionData {
-            layer_num: layer,
-            resolution: e.resolution,
-            component: e.component_idx,
-            precinct: e.precinct_idx,
-        })
-    }))
-}
-
-pub(crate) fn resolution_position_component_layer_progression<'a>(
-    input: IteratorInput<'a>,
-) -> Option<impl Iterator<Item = ProgressionData> + 'a> {
-    position_progression_common(input, |p, s| {
-        p.resolution
-            .cmp(&s.resolution)
-            .then_with(|| p.precinct_y.cmp(&s.precinct_y))
-            .then_with(|| p.precinct_x.cmp(&s.precinct_x))
-            .then_with(|| p.component_idx.cmp(&s.component_idx))
-            .then_with(|| p.precinct_idx.cmp(&s.precinct_idx))
-    })
-}
-
-pub(crate) fn position_component_resolution_layer_progression<'a>(
-    input: IteratorInput<'a>,
-) -> Option<impl Iterator<Item = ProgressionData> + 'a> {
-    position_progression_common(input, |p, s| {
-        p.precinct_y
-            .cmp(&s.precinct_y)
-            .then_with(|| p.precinct_x.cmp(&s.precinct_x))
-            .then_with(|| p.component_idx.cmp(&s.component_idx))
-            .then_with(|| p.resolution.cmp(&s.resolution))
-            .then_with(|| p.precinct_idx.cmp(&s.precinct_idx))
-    })
-}
-
-pub(crate) fn component_position_resolution_layer_progression<'a>(
-    input: IteratorInput<'a>,
-) -> Option<impl Iterator<Item = ProgressionData> + 'a> {
-    position_progression_common(input, |p, s| {
-        p.component_idx
-            .cmp(&s.component_idx)
-            .then_with(|| p.precinct_y.cmp(&s.precinct_y))
-            .then_with(|| p.precinct_x.cmp(&s.precinct_x))
-            .then_with(|| p.resolution.cmp(&s.resolution))
-            .then_with(|| p.precinct_idx.cmp(&s.precinct_idx))
+    Some(PositionIterator {
+        elements,
+        idx: 0,
+        layer: input.min_layer(),
+        min_layer: input.min_layer(),
+        max_layer: input.max_layer(),
     })
 }

@@ -1,3 +1,4 @@
+use super::codestream::Header;
 use super::decode::{DecompositionStorage, TileDecompositions};
 use super::rect::IntRect;
 use super::tag_tree::TagTree;
@@ -9,23 +10,25 @@ use core::ops::Range;
 use std::vec;
 
 pub(crate) fn build(
-    tile: &Tile<'_>,
+    tile: &Tile,
+    header: &Header,
     storage: &mut DecompositionStorage,
     skipped_resolution_levels: u8,
     cancel: Cancel<'_>,
 ) -> Result<()> {
-    build_decompositions(tile, storage, skipped_resolution_levels, cancel)
+    build_decompositions(tile, header, storage, skipped_resolution_levels, cancel)
 }
 
 fn build_decompositions(
-    tile: &Tile<'_>,
+    tile: &Tile,
+    header: &Header,
     storage: &mut DecompositionStorage,
     skipped_resolution_levels: u8,
     cancel: Cancel<'_>,
 ) -> Result<()> {
-    let mut component_samples = vec![];
+    let mut max_coefficients = 0_usize;
 
-    for component_tile in tile.component_tiles() {
+    for component_tile in tile.component_tiles(header) {
         let decoded_resolutions = component_tile
             .component_info
             .num_resolution_levels()
@@ -33,10 +36,10 @@ fn build_decompositions(
             .filter(|r| *r > 0)
             .ok_or(DecodeError::Malformed)?;
         let top_resolution = ResolutionTile::new(component_tile, decoded_resolutions - 1);
-        component_samples
-            .push(usize::try_from(top_resolution.rect.area()).map_err(|_| DecodeError::TooLarge)?);
+        let samples =
+            usize::try_from(top_resolution.rect.area()).map_err(|_| DecodeError::TooLarge)?;
+        max_coefficients = max_coefficients.max(samples);
     }
-    let max_coefficients = component_samples.iter().copied().max().unwrap_or(0);
 
     if storage.coefficients.is_empty() {
         storage.coefficients = vec![0.0; max_coefficients];
@@ -44,10 +47,13 @@ fn build_decompositions(
         cancel.resize(&mut storage.coefficients, max_coefficients)?;
     }
 
-    for (component_tile, &expected_samples) in tile.component_tiles().zip(&component_samples) {
+    for component_tile in tile.component_tiles(header) {
         let mut coefficient_counter = 0_usize;
         let decoded_resolutions =
             component_tile.component_info.num_resolution_levels() - skipped_resolution_levels;
+        let top_resolution = ResolutionTile::new(component_tile, decoded_resolutions - 1);
+        let expected_samples =
+            usize::try_from(top_resolution.rect.area()).map_err(|_| DecodeError::TooLarge)?;
         let d_start = storage.decompositions.len();
         let mut resolution_tiles = component_tile.resolution_tiles();
 
@@ -114,7 +120,7 @@ fn build_decompositions(
 fn build_precincts(
     resolution_tile: &ResolutionTile<'_>,
     sub_band_rect: IntRect,
-    tile: &Tile<'_>,
+    tile: &Tile,
     storage: &mut DecompositionStorage,
     cancel: Cancel<'_>,
 ) -> Result<Range<usize>> {
@@ -181,7 +187,7 @@ fn build_code_blocks(
     tile_instance: &ResolutionTile<'_>,
     code_blocks_x: u32,
     code_blocks_y: u32,
-    tile: &Tile<'_>,
+    tile: &Tile,
     storage: &mut DecompositionStorage,
     cancel: Cancel<'_>,
 ) -> Result<Range<usize>> {

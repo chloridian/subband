@@ -1,11 +1,10 @@
 use core::result;
-use std::boxed::Box;
 
 use super::build::Segment;
 use super::codestream::markers::{EOC, EPH, SOP};
 use super::codestream::{ComponentInfo, Header};
 use super::decode::{DecompositionStorage, SubBandIter};
-use super::progression::ProgressionData;
+use super::progression::{ProgressionData, ProgressionIterator};
 use super::tile::{Tile, TilePart};
 use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result, bail};
@@ -30,8 +29,9 @@ impl From<BitReadError> for PacketError {
 }
 
 pub(crate) fn parse(
-    tile: &Tile<'_>,
-    mut progression_iterator: Box<dyn Iterator<Item = ProgressionData> + '_>,
+    codestream: &[u8],
+    tile: &Tile,
+    mut progression_iterator: ProgressionIterator<'_>,
     header: &Header,
     storage: &mut DecompositionStorage,
     received_packets: &mut [u64],
@@ -39,12 +39,16 @@ pub(crate) fn parse(
     cancel: Cancel<'_>,
 ) -> Result<()> {
     let num_layers = usize::from(tile.num_layers);
+    let component_infos = tile.component_infos(header);
 
-    for tile_part in &tile.tile_parts {
+    for tile_part_data in &tile.tile_parts {
+        let tile_part = tile_part_data
+            .to_tile_part(codestream, header)
+            .ok_or(DecodeError::Malformed)?;
         match parse_inner(
-            tile_part.clone(),
+            tile_part,
             &mut progression_iterator,
-            &tile.component_infos,
+            component_infos,
             storage,
             received_packets,
             decoded_resolutions,
@@ -62,7 +66,7 @@ pub(crate) fn parse(
 
 fn parse_inner(
     mut tile_part: TilePart<'_>,
-    progression_iterator: &mut dyn Iterator<Item = ProgressionData>,
+    progression_iterator: &mut ProgressionIterator<'_>,
     component_infos: &[ComponentInfo],
     storage: &mut DecompositionStorage,
     received_packets: &mut [u64],
@@ -97,7 +101,7 @@ fn parse_inner(
 
 fn parse_packet(
     tile_part: &mut TilePart<'_>,
-    progression_iterator: &mut dyn Iterator<Item = ProgressionData>,
+    progression_iterator: &mut ProgressionIterator<'_>,
     component_infos: &[ComponentInfo],
     storage: &mut DecompositionStorage,
 ) -> result::Result<ProgressionData, PacketError> {
