@@ -30,6 +30,7 @@ pub(crate) fn decode(
     };
 
     ctx.reset(header, first_tile, cancel)?;
+    let num_components = first_tile.component_infos.len();
 
     let decoded_resolutions = usize::from(header.levels - header.skipped_resolution_levels) + 1;
     ctx.layers_received.clear();
@@ -49,6 +50,10 @@ pub(crate) fn decode(
             .resize(decoded_resolutions * num_layers, 0);
 
         let progression_iterator = progression_iterator(tile, header)?;
+        let channel_data = ctx
+            .channel_data
+            .get_mut(..num_components)
+            .ok_or(DecodeError::Malformed)?;
 
         decode_tile(
             data,
@@ -56,7 +61,7 @@ pub(crate) fn decode(
             header,
             progression_iterator,
             &mut ctx.tile_decode_context,
-            &mut ctx.channel_data,
+            channel_data,
             &mut ctx.storage,
             &mut ctx.received_packets,
             decoded_resolutions,
@@ -73,16 +78,16 @@ pub(crate) fn decode(
         )?;
     }
 
+    let channel_data = ctx
+        .channel_data
+        .get_mut(..num_components)
+        .ok_or(DecodeError::Malformed)?;
+
     if first_tile.mct {
-        mct::apply_inverse(
-            &mut ctx.channel_data,
-            &first_tile.component_infos,
-            header,
-            cancel,
-        )?;
+        mct::apply_inverse(channel_data, &first_tile.component_infos, header, cancel)?;
     }
 
-    apply_sign_shift(&mut ctx.channel_data, cancel)?;
+    apply_sign_shift(channel_data, cancel)?;
 
     Ok(())
 }
@@ -147,16 +152,24 @@ impl DecoderContext {
         self.tile_decode_context.reset();
         self.storage.reset();
 
-        self.channel_data.clear();
         let sample_count = (header.size_data.image_width() as usize)
             .checked_mul(header.size_data.image_height() as usize)
             .ok_or(DecodeError::TooLarge)?;
-        for _ in &initial_tile.component_infos {
+        let num_components = initial_tile.component_infos.len();
+        if self.channel_data.len() < num_components {
+            self.channel_data
+                .resize_with(num_components, || ComponentData {
+                    container: SimdBuffer::default(),
+                });
+        }
+        for channel in self
+            .channel_data
+            .get_mut(..num_components)
+            .ok_or(DecodeError::Malformed)?
+        {
             cancel.check()?;
 
-            self.channel_data.push(ComponentData {
-                container: SimdBuffer::zeros(sample_count),
-            });
+            channel.container.resize_zero(sample_count, cancel)?;
         }
 
         Ok(())
@@ -314,6 +327,8 @@ impl DecompositionStorage {
 pub(crate) struct TileDecodeContext {
     pub(crate) idwt_output: IDWTOutput,
     pub(crate) idwt_scratch_buffer: Vec<f32>,
+    pub(crate) idwt_low_row: Vec<f32>,
+    pub(crate) idwt_high_row: Vec<f32>,
     pub(crate) bit_plane_decode_context: BitPlaneDecodeContext,
     pub(crate) bit_plane_decode_buffers: BitPlaneDecodeBuffers,
 }

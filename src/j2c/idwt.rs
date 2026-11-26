@@ -54,16 +54,15 @@ pub(crate) fn apply(
         .get(tile_decompositions.first_ll_sub_band)
         .ok_or(DecodeError::Malformed)?;
 
-    let (scratch_buf, output) = (&mut tile_ctx.idwt_scratch_buffer, &mut tile_ctx.idwt_output);
+    let (scratch_buf, output, low_row, high_row) = (
+        &mut tile_ctx.idwt_scratch_buffer,
+        &mut tile_ctx.idwt_output,
+        &mut tile_ctx.idwt_low_row,
+        &mut tile_ctx.idwt_high_row,
+    );
 
-    let estimate_buffer_size = |decomposition: &Decomposition| {
-        let total_width = decomposition.rect.width() as usize;
-        let total_height = decomposition.rect.height() as usize;
-
-        let min = total_width * total_height;
-        let max = (total_width + 1) * (total_height + 1);
-
-        (min, max)
+    let buffer_size = |decomposition: &Decomposition| {
+        decomposition.rect.width() as usize * decomposition.rect.height() as usize
     };
 
     let Some((first, rest)) = decompositions.split_first() else {
@@ -80,11 +79,10 @@ pub(crate) fn apply(
     };
 
     let last = decompositions.last().ok_or(DecodeError::Malformed)?;
-    let (s_min, s_max) = estimate_buffer_size(last);
-    if output.coefficients.len() < s_min {
-        output
-            .coefficients
-            .reserve_exact(s_max - output.coefficients.len());
+    let last_size = buffer_size(last);
+    if output.coefficients.capacity() < last_size {
+        output.coefficients.clear();
+        output.coefficients.reserve_exact(last_size);
     }
 
     if let Some(prev) = decompositions
@@ -92,11 +90,21 @@ pub(crate) fn apply(
         .checked_sub(2)
         .and_then(|i| decompositions.get(i))
     {
-        let (s_min, s_max) = estimate_buffer_size(prev);
-
-        if scratch_buf.len() < s_min {
-            scratch_buf.reserve_exact(s_max - scratch_buf.len());
+        let prev_size = buffer_size(prev);
+        if scratch_buf.capacity() < prev_size {
+            scratch_buf.clear();
+            scratch_buf.reserve_exact(prev_size);
         }
+    }
+
+    let max_half_width = (last.rect.width() as usize).div_ceil(2) + 2;
+    if low_row.capacity() < max_half_width {
+        low_row.clear();
+        low_row.reserve_exact(max_half_width);
+    }
+    if high_row.capacity() < max_half_width {
+        high_row.clear();
+        high_row.reserve_exact(max_half_width);
     }
 
     let mut use_scratch = decompositions.len().is_multiple_of(2);
@@ -108,6 +116,8 @@ pub(crate) fn apply(
         } else {
             &mut output.coefficients
         },
+        low_row,
+        high_row,
         first,
         transform,
         storage,
@@ -121,6 +131,8 @@ pub(crate) fn apply(
             filter_2d(
                 IDWTInput::from_output(&output.coefficients),
                 scratch_buf,
+                low_row,
+                high_row,
                 decomposition,
                 transform,
                 storage,
@@ -130,6 +142,8 @@ pub(crate) fn apply(
             filter_2d(
                 IDWTInput::from_output(scratch_buf),
                 &mut output.coefficients,
+                low_row,
+                high_row,
                 decomposition,
                 transform,
                 storage,
@@ -165,13 +179,15 @@ impl<'a> IDWTInput<'a> {
 fn filter_2d(
     input: IDWTInput<'_>,
     coefficients: &mut Vec<f32>,
+    low_row: &mut Vec<f32>,
+    high_row: &mut Vec<f32>,
     decomposition: &Decomposition,
     transform: WaveletTransform,
     storage: &DecompositionStorage,
     cancel: Cancel<'_>,
 ) -> Result<IDWTTempOutput> {
     dispatch!(Level::new(), simd => {
-        filter_2d_inner(simd, input, coefficients, decomposition, transform, storage, cancel)
+        filter_2d_inner(simd, input, coefficients, low_row, high_row, decomposition, transform, storage, cancel)
     })?;
 
     Ok(IDWTTempOutput {
@@ -184,6 +200,8 @@ fn filter_2d_inner<S: Simd>(
     simd: S,
     input: IDWTInput<'_>,
     coefficients: &mut Vec<f32>,
+    low_row: &mut Vec<f32>,
+    high_row: &mut Vec<f32>,
     decomposition: &Decomposition,
     transform: WaveletTransform,
     storage: &DecompositionStorage,
@@ -204,6 +222,8 @@ fn filter_2d_inner<S: Simd>(
         simd,
         input,
         coefficients,
+        low_row,
+        high_row,
         decomposition,
         transform,
         storage,
@@ -217,6 +237,8 @@ fn interleave_and_filter_horizontal<S: Simd>(
     simd: S,
     input: IDWTInput<'_>,
     coefficients: &mut [f32],
+    low_row: &mut Vec<f32>,
+    high_row: &mut Vec<f32>,
     decomposition: &Decomposition,
     transform: WaveletTransform,
     storage: &DecompositionStorage,
@@ -245,7 +267,14 @@ fn interleave_and_filter_horizontal<S: Simd>(
 
     let num_low = (u1.div_ceil(2) - u0.div_ceil(2)) as usize;
     let num_high = (u1 / 2 - u0 / 2) as usize;
-    let mut filter = HorizontalFilter::new(transform, u0.is_multiple_of(2), num_low, num_high);
+    let mut filter = HorizontalFilter::new(
+        transform,
+        u0.is_multiple_of(2),
+        num_low,
+        num_high,
+        low_row,
+        high_row,
+    );
 
     let (first_low_row, first_high_row) = if v0.is_multiple_of(2) { (0, 1) } else { (1, 0) };
     filter.filter_rows(
@@ -270,34 +299,45 @@ fn interleave_and_filter_horizontal<S: Simd>(
     )
 }
 
-struct HorizontalFilter {
+struct HorizontalFilter<'a> {
     transform: WaveletTransform,
     low_first: bool,
     num_low: usize,
     num_high: usize,
-    low: Vec<f32>,
-    high: Vec<f32>,
+    low: &'a mut Vec<f32>,
+    high: &'a mut Vec<f32>,
 }
 
-impl HorizontalFilter {
-    fn new(transform: WaveletTransform, low_first: bool, num_low: usize, num_high: usize) -> Self {
+impl<'a> HorizontalFilter<'a> {
+    fn new(
+        transform: WaveletTransform,
+        low_first: bool,
+        num_low: usize,
+        num_high: usize,
+        low: &'a mut Vec<f32>,
+        high: &'a mut Vec<f32>,
+    ) -> Self {
+        low.clear();
+        low.resize(num_low + 2, 0.0);
+        high.clear();
+        high.resize(num_high + 2, 0.0);
         Self {
             transform,
             low_first,
             num_low,
             num_high,
-            low: vec![0.0; num_low + 2],
-            high: vec![0.0; num_high + 2],
+            low,
+            high,
         }
     }
 
     #[inline(always)]
-    fn filter_rows<'a, S: Simd>(
+    fn filter_rows<'b, S: Simd>(
         &mut self,
         simd: S,
         low_band: &[f32],
         high_band: &[f32],
-        rows: impl Iterator<Item = &'a mut [f32]>,
+        rows: impl Iterator<Item = &'b mut [f32]>,
         cancel: Cancel<'_>,
     ) -> Result<()> {
         for (v, row) in rows.enumerate() {
@@ -345,7 +385,7 @@ impl HorizontalFilter {
     }
 }
 
-impl<S: Simd> Lifting<S> for HorizontalFilter {
+impl<S: Simd> Lifting<S> for HorizontalFilter<'_> {
     #[inline(always)]
     fn num_samples(&self) -> usize {
         self.num_low + self.num_high
@@ -377,14 +417,7 @@ impl<S: Simd> Lifting<S> for HorizontalFilter {
         f_scalar: impl Fn(f32, f32, f32) -> f32,
     ) -> Result<()> {
         let offset = usize::from(self.low_first);
-        lift_band(
-            simd,
-            &mut self.low,
-            &mut self.high,
-            offset,
-            f_simd,
-            f_scalar,
-        );
+        lift_band(simd, self.low, self.high, offset, f_simd, f_scalar);
 
         Ok(())
     }
@@ -397,14 +430,7 @@ impl<S: Simd> Lifting<S> for HorizontalFilter {
         f_scalar: impl Fn(f32, f32, f32) -> f32,
     ) -> Result<()> {
         let offset = usize::from(!self.low_first);
-        lift_band(
-            simd,
-            &mut self.high,
-            &mut self.low,
-            offset,
-            f_simd,
-            f_scalar,
-        );
+        lift_band(simd, self.high, self.low, offset, f_simd, f_scalar);
 
         Ok(())
     }
