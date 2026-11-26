@@ -1,4 +1,3 @@
-// INITDEC, BYTEIN and DECODE follow the T.88 Annex G variant.
 pub(crate) struct ArithmeticDecoder<'a> {
     data: &'a [u8],
     c: u32,

@@ -74,7 +74,6 @@ impl<'a> IteratorInput<'a> {
 
     fn max_resolution(&self, component_idx: u8) -> u8 {
         self.total_max_resolution()
-            // `resolutions.1` is the maximum over all components.
             .min(self.tile.component_infos[component_idx as usize].num_resolution_levels())
     }
 
@@ -144,7 +143,6 @@ pub(crate) fn progression_iterator<'a>(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Skip packets already emitted by an earlier progression change.
     let mut included = BTreeSet::new();
 
     Ok(Box::new(

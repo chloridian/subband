@@ -528,7 +528,6 @@ impl<'a> ResolutionTile<'a> {
         let mut y_start = (self.rect.y0 / (1 << ppy)) * (1 << ppy);
         let mut x_start = (self.rect.x0 / (1 << ppx)) * (1 << ppx);
 
-        // The spec only reduces PPx/PPy for code-blocks, but precincts need it too.
         if self.resolution > 0 {
             ppx = ppx.checked_sub(1)?;
             ppy = ppy.checked_sub(1)?;

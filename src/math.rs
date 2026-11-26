@@ -151,7 +151,6 @@ mod inner {
         channels: [&[f32; 16]; N],
         out: &mut [u8],
     ) {
-        // TODO: This can be optimized on ARM by specializing it.
         match N {
             1 => to_u8(simd, channels[0]).store_slice(out),
             2 => {
@@ -193,8 +192,6 @@ mod inner {
         let convert = |i: usize| {
             let v = fearless_simd::f32x8::from_slice(simd, &values[i..i + 8]) + half;
 
-            // On NEON, the unsigned conversion and the narrowing saturate by themselves,
-            // which saves the explicit clamping.
             #[cfg(target_arch = "aarch64")]
             {
                 let (a, b) = simd.split_u32x8(simd.cvt_u32_precise_f32x8(v));
@@ -212,8 +209,6 @@ mod inner {
                 simd.relaxed_narrow_i32x4(a, b).bitcast()
             }
         };
-        // A relaxed narrow here makes LLVM fuse both steps into a 32-to-8-bit truncation,
-        // which it scalarizes on wasm.
         simd.saturating_narrow_u16x8(convert(0), convert(8))
     }
 
@@ -445,7 +440,6 @@ mod inner {
         }
     }
 
-    /// Scalar fallback for SIMD dispatch.
     #[macro_export]
     macro_rules! simd_dispatch {
         ($level:expr, $simd:ident => $body:expr) => {{

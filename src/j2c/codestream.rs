@@ -304,7 +304,6 @@ impl ComponentInfo {
         let n_ll = self.coding_style.parameters.num_decomposition_levels;
 
         let sb_index = match sub_band_type {
-            // TODO: Shouldn't be reached.
             SubBandType::LowLow => u16::MAX,
             SubBandType::HighLow => 0,
             SubBandType::LowHigh => 1,
@@ -691,7 +690,6 @@ fn ppm_marker<'a>(reader: &mut BitReader<'a>) -> Option<PpmMarkerData<'a>> {
 }
 
 fn ppm_packets(mut markers: Vec<PpmMarkerData<'_>>) -> Option<Vec<PpmPacket>> {
-    // A tile-part's packet headers can continue in the next PPM segment.
     markers.sort_by_key(|m| m.sequence_idx);
     let data = markers
         .iter()

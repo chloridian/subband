@@ -1,5 +1,3 @@
-//! Decodes the JPEG 2000 files in `streams` and compares them against `references`.
-
 mod cancel;
 mod code_blocks;
 mod codestream;

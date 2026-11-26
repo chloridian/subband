@@ -11,7 +11,6 @@ pub(crate) mod r#box;
 
 const MAX_BOXES_PER_LEVEL: usize = 64;
 
-/// A decoded JPEG2000 image.
 pub struct DecodedImage<'a> {
     pub(crate) decoded_components: &'a mut Vec<ComponentData>,
     pub(crate) cancel: Cancel<'a>,

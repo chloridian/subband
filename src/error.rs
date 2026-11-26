@@ -1,21 +1,13 @@
-//! Error types for JPEG 2000 decoding.
-
 use core::fmt;
 
-/// The error type for JPEG 2000 decoding operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
-    /// Valid JPEG 2000 feature not supported by this decoder.
     Unsupported,
-    /// Input, dimensions, or resource count exceeds limits.
     TooLarge,
-    /// Malformed, truncated, or inconsistent codestream or container.
     Malformed,
-    /// Decoding was cancelled.
     Cancelled,
 }
 
-/// The error returned when decoding was cancelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cancelled;
 
@@ -45,7 +37,6 @@ impl From<Cancelled> for DecodeError {
     }
 }
 
-/// Result type for JPEG 2000 decoding operations.
 pub type Result<T> = core::result::Result<T, DecodeError>;
 
 macro_rules! bail {
