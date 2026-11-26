@@ -59,9 +59,12 @@ pub(crate) fn apply(
         .decompositions
         .get(tile_decompositions.decompositions.clone())
         .ok_or(DecodeError::Malformed)?;
-    let keep = decompositions
-        .len()
-        .saturating_sub(header.skipped_resolution_levels as usize);
+    let keep = usize::from(
+        component_info
+            .num_resolution_levels()
+            .saturating_sub(header.skipped_resolution_levels)
+            .saturating_sub(1),
+    );
     let decompositions = decompositions.get(..keep).ok_or(DecodeError::Malformed)?;
     let ll_sub_band = storage
         .sub_bands

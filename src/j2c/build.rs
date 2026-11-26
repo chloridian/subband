@@ -1,4 +1,4 @@
-use super::codestream::Header;
+use super::codestream::{Header, ProgressionOrder};
 use super::decode::{DecompositionStorage, TileDecompositions};
 use super::rect::IntRect;
 use super::tag_tree::TagTree;
@@ -7,6 +7,29 @@ use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result};
 use core::iter;
 use core::ops::Range;
+
+pub(crate) fn can_stop_at_discard(tile: &Tile, header: &Header) -> bool {
+    tile.progression_changes.is_empty()
+        && header.progression_changes.is_empty()
+        && matches!(
+            tile.progression_order,
+            ProgressionOrder::ResolutionLayerComponentPosition
+                | ProgressionOrder::ResolutionPositionComponentLayer
+        )
+}
+
+pub(crate) fn max_decoded_resolutions(tile: &Tile, header: &Header) -> Result<u8> {
+    let mut max_res = 0_u8;
+    for component_info in tile.component_infos(header) {
+        let res = component_info
+            .num_resolution_levels()
+            .checked_sub(header.skipped_resolution_levels)
+            .filter(|r| *r > 0)
+            .ok_or(DecodeError::Malformed)?;
+        max_res = max_res.max(res);
+    }
+    Ok(max_res)
+}
 
 pub(crate) fn build(
     tile: &Tile,
@@ -25,23 +48,39 @@ fn build_decompositions(
     skipped_resolution_levels: u8,
     cancel: Cancel<'_>,
 ) -> Result<()> {
+    let stop_at_discard = can_stop_at_discard(tile, header);
+    let max_res = max_decoded_resolutions(tile, header)?;
+
     for component_tile in tile.component_tiles(header) {
-        component_tile
+        let comp_decoded_resolutions = component_tile
             .component_info
             .num_resolution_levels()
             .checked_sub(skipped_resolution_levels)
             .filter(|r| *r > 0)
             .ok_or(DecodeError::Malformed)?;
+        let built_resolutions = if stop_at_discard {
+            usize::from(max_res)
+        } else {
+            usize::from(component_tile.component_info.num_resolution_levels())
+        };
         let d_start = storage.decompositions.len();
-        let mut resolution_tiles = component_tile.resolution_tiles();
+        let mut resolution_tiles = component_tile.resolution_tiles().take(built_resolutions);
 
         let build_sub_band = |sub_band_type: SubBandType,
                               resolution_tile: &ResolutionTile<'_>,
                               storage: &mut DecompositionStorage|
          -> Result<usize> {
             let sub_band_rect = resolution_tile.sub_band_rect(sub_band_type);
+            let allocate_layers = resolution_tile.resolution < comp_decoded_resolutions;
 
-            let precincts = build_precincts(resolution_tile, sub_band_rect, tile, storage, cancel)?;
+            let precincts = build_precincts(
+                resolution_tile,
+                sub_band_rect,
+                tile,
+                allocate_layers,
+                storage,
+                cancel,
+            )?;
 
             let idx = storage.sub_bands.len();
             storage.sub_bands.push(SubBand {
@@ -85,6 +124,7 @@ fn build_precincts(
     resolution_tile: &ResolutionTile<'_>,
     sub_band_rect: IntRect,
     tile: &Tile,
+    allocate_layers: bool,
     storage: &mut DecompositionStorage,
     cancel: Cancel<'_>,
 ) -> Result<Range<usize>> {
@@ -124,6 +164,7 @@ fn build_precincts(
             code_blocks_x,
             code_blocks_y,
             tile,
+            allocate_layers,
             storage,
             cancel,
         )?;
@@ -152,6 +193,7 @@ fn build_code_blocks(
     code_blocks_x: u32,
     code_blocks_y: u32,
     tile: &Tile,
+    allocate_layers: bool,
     storage: &mut DecompositionStorage,
     cancel: Cancel<'_>,
 ) -> Result<Range<usize>> {
@@ -171,12 +213,17 @@ fn build_code_blocks(
             let area = IntRect::from_xywh(x, y, code_block_width, code_block_height)
                 .intersect(sub_band_rect);
 
-            let start = storage.layers.len();
-            storage.layers.extend(iter::repeat_n(
-                Layer { segments: None },
-                tile.num_layers as usize,
-            ));
-            let end = storage.layers.len();
+            let layers = if allocate_layers {
+                let start = storage.layers.len();
+                storage.layers.extend(iter::repeat_n(
+                    Layer { segments: None },
+                    tile.num_layers as usize,
+                ));
+                let end = storage.layers.len();
+                start..end
+            } else {
+                0..0
+            };
 
             storage.code_blocks.push(CodeBlock {
                 x_idx,
@@ -186,7 +233,7 @@ fn build_code_blocks(
                 missing_bit_planes: 0,
                 l_block: 3,
                 number_of_coding_passes: 0,
-                layers: start..end,
+                layers,
                 non_empty_layer_count: 0,
             });
 
