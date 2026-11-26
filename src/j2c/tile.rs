@@ -11,7 +11,7 @@ use crate::error::{DecodeError, Result, bail};
 use crate::j2c::codestream;
 use crate::reader::BitReader;
 
-const MAX_TILE_PARTS_PER_TILE: usize = 1024;
+pub(crate) const MAX_TILE_PARTS_PER_TILE: usize = 1024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Tile<'a> {
@@ -72,7 +72,7 @@ impl<'a> TilePart<'a> {
 }
 
 impl<'a> Tile<'a> {
-    fn new(idx: u32, header: &Header) -> Self {
+    pub(crate) fn new(idx: u32, header: &Header) -> Self {
         let rect = {
             let size_data = &header.size_data;
 
@@ -636,17 +636,17 @@ impl<'a> ResolutionTile<'a> {
     }
 }
 
-struct TilePartHeader {
-    tile_index: u16,
-    tile_part_length: u32,
+pub(crate) struct TilePartHeader {
+    pub(crate) tile_index: u16,
+    pub(crate) tile_part_length: u32,
 }
 
-struct PptMarkerData<'a> {
-    data: &'a [u8],
-    sequence_idx: u8,
+pub(crate) struct PptMarkerData<'a> {
+    pub(crate) data: &'a [u8],
+    pub(crate) sequence_idx: u8,
 }
 
-fn ppt_marker<'a>(reader: &mut BitReader<'a>) -> Option<PptMarkerData<'a>> {
+pub(crate) fn ppt_marker<'a>(reader: &mut BitReader<'a>) -> Option<PptMarkerData<'a>> {
     let length = reader.read_u16()?.checked_sub(2)?;
     let header_len = length.checked_sub(1)?;
     let sequence_idx = reader.read_byte()?;
@@ -656,7 +656,7 @@ fn ppt_marker<'a>(reader: &mut BitReader<'a>) -> Option<PptMarkerData<'a>> {
     })
 }
 
-fn sot_marker(reader: &mut BitReader<'_>) -> Option<TilePartHeader> {
+pub(crate) fn sot_marker(reader: &mut BitReader<'_>) -> Option<TilePartHeader> {
     let _ = reader.read_u16()?;
 
     let tile_index = reader.read_u16()?;

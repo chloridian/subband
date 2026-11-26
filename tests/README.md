@@ -16,6 +16,7 @@ oxipng -o max --nx tests/references/*.png
 - `code_blocks.rs`: code-block coding styles (bypass, reset, termall, vcausal, pterm, segsym) and bitplane edge cases.
 - `codestream.rs`: image and tile geometry, decomposition levels, code-block and precinct sizes, guard bits, and marker segments.
 - `errors.rs`: rejection of malformed codestreams, unsupported features, and size or resource limits.
+- `inspect.rs`: codestream prefix inspection, PLT and packet-header boundaries, and prefix-decode parity.
 - `jp2.rs`: JP2 container unwrapping, box lengths, and header validation.
 - `mct.rs`: reversible and irreversible multi-component transforms.
 - `packets.rs`: progression orders, SOP/EPH markers, PPM/PPT packed headers, POC changes, and empty packets.

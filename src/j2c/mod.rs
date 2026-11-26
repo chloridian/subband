@@ -4,6 +4,7 @@ mod build;
 mod codestream;
 mod decode;
 mod idwt;
+mod inspect;
 mod mct;
 mod progression;
 mod rect;
@@ -20,6 +21,8 @@ use crate::math::{SIMD_WIDTH, SimdBuffer};
 pub(crate) use codestream::Header;
 pub use decode::DecoderContext;
 pub(crate) use decode::decode;
+pub use inspect::Inspection;
+pub(crate) use inspect::inspect;
 
 pub(crate) struct ParsedCodestream<'a> {
     pub(crate) header: Header,

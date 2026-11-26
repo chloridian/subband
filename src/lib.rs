@@ -15,7 +15,7 @@ pub use cancel::{CancelCheck, CancelHandle};
 
 use crate::math::{Level, Simd, dispatch};
 pub use error::{Cancelled, DecodeError, Result};
-pub use j2c::{ComponentData, DecoderContext};
+pub use j2c::{ComponentData, DecoderContext, Inspection};
 pub use jp2::DecodedImage;
 
 mod j2c;
@@ -133,6 +133,18 @@ impl DecodedImage<'_> {
 
     pub fn store_u8_into(&self, buf: &mut [u8]) -> result::Result<(), Cancelled> {
         interleave_and_convert(self, buf)
+    }
+}
+
+pub fn inspect(data: &[u8], settings: &DecodeSettings) -> Result<Inspection> {
+    if data.len() > settings.max_input {
+        return Err(DecodeError::TooLarge);
+    }
+
+    if data.starts_with(CODESTREAM_MAGIC) {
+        j2c::inspect(data, settings)
+    } else {
+        Err(DecodeError::Malformed)
     }
 }
 
