@@ -248,13 +248,15 @@ fn filter_2d_first(
 ) -> Result<IDWTTempOutput> {
     let width = decomposition.rect.width() as usize;
     let height = decomposition.rect.height() as usize;
-    assert!(coefficients.capacity() >= width * height);
-    cancel.resize(coefficients, width * height)?;
-    if width == 0 || height == 0 {
+    let len = width * height;
+    assert!(coefficients.capacity() >= len);
+    cancel.ensure_len(coefficients, len)?;
+    if len == 0 {
         return Ok(IDWTTempOutput {
             rect: decomposition.rect,
         });
     }
+    let coefficients = coefficients.get_mut(..len).ok_or(DecodeError::Malformed)?;
 
     dispatch!(Level::new(), simd => {
         let transform = component_info.wavelet_transform();
@@ -343,13 +345,15 @@ fn filter_2d(
 ) -> Result<IDWTTempOutput> {
     let width = decomposition.rect.width() as usize;
     let height = decomposition.rect.height() as usize;
-    assert!(coefficients.capacity() >= width * height);
-    cancel.resize(coefficients, width * height)?;
-    if width == 0 || height == 0 {
+    let len = width * height;
+    assert!(coefficients.capacity() >= len);
+    cancel.ensure_len(coefficients, len)?;
+    if len == 0 {
         return Ok(IDWTTempOutput {
             rect: decomposition.rect,
         });
     }
+    let coefficients = coefficients.get_mut(..len).ok_or(DecodeError::Malformed)?;
 
     dispatch!(Level::new(), simd => {
         let transform = component_info.wavelet_transform();
@@ -451,7 +455,7 @@ fn filter_low_rows_streaming<S: Simd>(
     let y1 = hl_sb.rect.y1;
     let cb_height = hl_sb.cb_height;
     let mut filter =
-        HorizontalFilter::new(transform, low_first, num_low, num_high, low_row, high_row);
+        HorizontalFilter::new(transform, low_first, num_low, num_high, low_row, high_row)?;
 
     let mut abs_y = y0;
     while abs_y < y1 {
@@ -533,7 +537,7 @@ fn filter_high_rows_streaming<S: Simd>(
     let y1 = lh_sb.rect.y1;
     let cb_height = lh_sb.cb_height;
     let mut filter =
-        HorizontalFilter::new(transform, low_first, num_low, num_high, low_row, high_row);
+        HorizontalFilter::new(transform, low_first, num_low, num_high, low_row, high_row)?;
 
     let mut abs_y = y0;
     while abs_y < y1 {
@@ -594,8 +598,8 @@ struct HorizontalFilter<'a> {
     low_first: bool,
     num_low: usize,
     num_high: usize,
-    low: &'a mut Vec<f32>,
-    high: &'a mut Vec<f32>,
+    low: &'a mut [f32],
+    high: &'a mut [f32],
 }
 
 impl<'a> HorizontalFilter<'a> {
@@ -606,19 +610,25 @@ impl<'a> HorizontalFilter<'a> {
         num_high: usize,
         low: &'a mut Vec<f32>,
         high: &'a mut Vec<f32>,
-    ) -> Self {
-        low.clear();
-        low.resize(num_low + 2, 0.0);
-        high.clear();
-        high.resize(num_high + 2, 0.0);
-        Self {
+    ) -> Result<Self> {
+        let low_len = num_low + 2;
+        if low.len() < low_len {
+            low.resize(low_len, 0.0);
+        }
+        let high_len = num_high + 2;
+        if high.len() < high_len {
+            high.resize(high_len, 0.0);
+        }
+        let low = low.get_mut(..low_len).ok_or(DecodeError::Malformed)?;
+        let high = high.get_mut(..high_len).ok_or(DecodeError::Malformed)?;
+        Ok(Self {
             transform,
             low_first,
             num_low,
             num_high,
             low,
             high,
-        }
+        })
     }
 
     #[inline(always)]

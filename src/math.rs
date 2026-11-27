@@ -545,10 +545,18 @@ pub(crate) struct SimdBuffer<const N: usize> {
 }
 
 impl<const N: usize> SimdBuffer<N> {
-    pub(crate) fn resize_zero(&mut self, original_len: usize, cancel: Cancel<'_>) -> Result<()> {
+    pub(crate) fn prepare(
+        &mut self,
+        original_len: usize,
+        zero: bool,
+        cancel: Cancel<'_>,
+    ) -> Result<()> {
         let padded_len = Self::padded_len(original_len);
-        self.data.clear();
-        cancel.resize(&mut self.data, padded_len)?;
+        if zero {
+            cancel.zero_prefix(&mut self.data, padded_len)?;
+        } else {
+            cancel.ensure_len(&mut self.data, padded_len)?;
+        }
         self.original_len = original_len;
         Ok(())
     }
@@ -563,7 +571,11 @@ impl<const N: usize> SimdBuffer<N> {
 
     pub(crate) fn restore_padding(&mut self) {
         let padded_len = Self::padded_len(self.original_len);
-        self.data.resize(padded_len, 0.0);
+        if let Some(pad) = self.data.get_mut(self.original_len..padded_len) {
+            pad.fill(0.0);
+        } else {
+            self.data.resize(padded_len, 0.0);
+        }
     }
 
     fn padded_len(original_len: usize) -> usize {
@@ -578,13 +590,15 @@ impl<const N: usize> Deref for SimdBuffer<N> {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        &self.data
+        let len = Self::padded_len(self.original_len).min(self.data.len());
+        self.data.split_at(len).0
     }
 }
 
 impl<const N: usize> DerefMut for SimdBuffer<N> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.data
+        let len = Self::padded_len(self.original_len).min(self.data.len());
+        self.data.split_at_mut(len).0
     }
 }

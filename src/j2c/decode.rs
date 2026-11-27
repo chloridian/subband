@@ -27,15 +27,17 @@ pub(crate) fn decode(
         bail!(DecodeError::Malformed);
     }
 
-    let first_mct = ctx.tiles.first().ok_or(DecodeError::Malformed)?.mct;
-    let num_components = ctx
-        .tiles
-        .first()
-        .ok_or(DecodeError::Malformed)?
-        .component_infos(header)
-        .len();
+    let first_tile = ctx.tiles.first().ok_or(DecodeError::Malformed)?;
+    let first_mct = first_tile.mct;
+    let num_components = first_tile.component_infos(header).len();
+    let zero_channels = tile_count != 1
+        || first_tile.tile_parts.is_empty()
+        || !first_tile
+            .component_infos(header)
+            .iter()
+            .all(|ci| is_full_image_tile(first_tile, ci, header));
 
-    ctx.reset(header, num_components, cancel)?;
+    ctx.reset(header, num_components, zero_channels, cancel)?;
 
     let decoded_resolutions = usize::from(header.levels - header.skipped_resolution_levels) + 1;
     ctx.layers_received.clear();
@@ -156,7 +158,13 @@ pub struct DecoderContext {
 }
 
 impl DecoderContext {
-    fn reset(&mut self, header: &Header, num_components: usize, cancel: Cancel<'_>) -> Result<()> {
+    fn reset(
+        &mut self,
+        header: &Header,
+        num_components: usize,
+        zero_channels: bool,
+        cancel: Cancel<'_>,
+    ) -> Result<()> {
         self.tile_decode_context.reset();
         self.storage.reset();
 
@@ -176,11 +184,25 @@ impl DecoderContext {
         {
             cancel.check()?;
 
-            channel.container.resize_zero(sample_count, cancel)?;
+            channel
+                .container
+                .prepare(sample_count, zero_channels, cancel)?;
         }
 
         Ok(())
     }
+}
+
+fn is_full_image_tile(tile: &Tile, component_info: &ComponentInfo, header: &Header) -> bool {
+    let component_tile = ComponentTile::new(tile, component_info);
+    let resolution_tile = ResolutionTile::new(
+        component_tile,
+        component_info.num_resolution_levels() - 1 - header.skipped_resolution_levels,
+    );
+    resolution_tile.rect.x0 == 0
+        && resolution_tile.rect.y0 == 0
+        && resolution_tile.rect.width() == header.size_data.image_width()
+        && resolution_tile.rect.height() == header.size_data.image_height()
 }
 
 fn decode_tile(
@@ -223,15 +245,7 @@ fn decode_tile(
     {
         cancel.check()?;
 
-        let component_tile = ComponentTile::new(tile, component_info);
-        let resolution_tile = ResolutionTile::new(
-            component_tile,
-            component_info.num_resolution_levels() - 1 - header.skipped_resolution_levels,
-        );
-        let full_image_tile = resolution_tile.rect.x0 == 0
-            && resolution_tile.rect.y0 == 0
-            && resolution_tile.rect.width() == header.size_data.image_width()
-            && resolution_tile.rect.height() == header.size_data.image_height();
+        let full_image_tile = is_full_image_tile(tile, component_info, header);
 
         if full_image_tile {
             idwt::apply(
@@ -388,8 +402,7 @@ pub(crate) fn decode_sub_band_strip(
     let strip_len = sb_width
         .checked_mul(strip_height)
         .ok_or(DecodeError::TooLarge)?;
-    dst.clear();
-    cancel.resize(dst, strip_len)?;
+    cancel.ensure_len(dst, strip_len)?;
 
     if strip_len == 0 {
         return Ok(());
@@ -468,7 +481,11 @@ pub(crate) fn decode_sub_band_strip(
 
             cancel.check()?;
 
-            bitplane::decode(
+            let x_offset = code_block.rect.x0 - sub_band.rect.x0;
+            let y_offset = code_block.rect.y0 - abs_y0;
+            let mut base_idx = (y_offset as usize) * sb_width + x_offset as usize;
+
+            if !bitplane::decode(
                 codestream,
                 code_block,
                 sub_band.sub_band_type,
@@ -479,28 +496,28 @@ pub(crate) fn decode_sub_band_strip(
                 storage,
                 header.max_layers,
                 header.strict,
-            )?;
-
-            let x_offset = code_block.rect.x0 - sub_band.rect.x0;
-            let y_offset = code_block.rect.y0 - abs_y0;
-            let mut base_idx = (y_offset as usize) * sb_width + x_offset as usize;
-
-            for (coefficients, coefficient_states) in bit_plane_ctx.coefficient_rows() {
-                let out_row = dst.get_mut(base_idx..).ok_or(DecodeError::Malformed)?;
-
-                for ((output, coefficient), coefficient_state) in
-                    out_row.iter_mut().zip(coefficients).zip(coefficient_states)
-                {
-                    *output = coefficient.reconstructed(
-                        coefficient_state,
-                        irreversible,
-                        component_info.roi_shift,
-                    );
-                    *output *= dequantization_step;
+            )? {
+                let cb_w = code_block.rect.width() as usize;
+                let cb_h = code_block.rect.height() as usize;
+                for _ in 0..cb_h {
+                    let out_row = dst
+                        .get_mut(base_idx..)
+                        .and_then(|r| r.get_mut(..cb_w))
+                        .ok_or(DecodeError::Malformed)?;
+                    out_row.fill(0.0);
+                    base_idx += sb_width;
                 }
-
-                base_idx += sb_width;
+                continue;
             }
+
+            bit_plane_ctx.write_reconstructed(
+                dst,
+                base_idx,
+                sb_width,
+                irreversible,
+                component_info.roi_shift,
+                dequantization_step,
+            )?;
         }
     }
 

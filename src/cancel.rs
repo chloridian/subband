@@ -54,8 +54,10 @@ impl Cancel<'_> {
         }
     }
 
-    pub(crate) fn resize(self, buf: &mut Vec<f32>, len: usize) -> Result<()> {
-        buf.truncate(len);
+    pub(crate) fn ensure_len(self, buf: &mut Vec<f32>, len: usize) -> Result<()> {
+        if buf.len() >= len {
+            return Ok(());
+        }
         buf.reserve(len - buf.len());
 
         while buf.len() < len {
@@ -66,5 +68,19 @@ impl Cancel<'_> {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn zero_prefix(self, buf: &mut Vec<f32>, len: usize) -> Result<()> {
+        let existing = buf.len().min(len);
+        for chunk in buf
+            .get_mut(..existing)
+            .unwrap_or_default()
+            .chunks_mut(CHUNK)
+        {
+            self.check()?;
+            chunk.fill(0.0);
+        }
+
+        self.ensure_len(buf, len)
     }
 }

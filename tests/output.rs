@@ -182,3 +182,48 @@ fn shared_context_matches_fresh() {
         }
     }
 }
+
+#[test]
+fn shared_context_prefix_matches_fresh() {
+    let warm_data = fixture("rgba-2048-lossy");
+    let warm_image = Image::from_codestream(&warm_data, &DecodeSettings::default())
+        .expect("warm fixture parses");
+    let mut shared = DecoderContext::default();
+    let _ = warm_image
+        .decode(&mut shared)
+        .expect("warm fixture decodes");
+
+    for name in ["plywood", "rgba-1024-lrcp", "rgb-1024-rlcp"] {
+        let data = fixture(name);
+        for discard in [0, 2] {
+            let settings = DecodeSettings {
+                discard,
+                ..DecodeSettings::default()
+            };
+            for cut in [256, 600, 2000, 8192] {
+                let Some(prefix) = data.get(..cut) else {
+                    continue;
+                };
+                let Ok(image) = Image::from_codestream(prefix, &settings) else {
+                    continue;
+                };
+
+                let mut fresh = DecoderContext::default();
+                let expected = image
+                    .decode(&mut fresh)
+                    .unwrap_or_else(|e| panic!("{name} d{discard} cut {cut}: fresh failed: {e}"))
+                    .data_u8()
+                    .expect("fresh data_u8");
+                let actual = image
+                    .decode(&mut shared)
+                    .unwrap_or_else(|e| panic!("{name} d{discard} cut {cut}: shared failed: {e}"))
+                    .data_u8()
+                    .expect("shared data_u8");
+                assert_eq!(
+                    actual, expected,
+                    "{name} d{discard} cut {cut}: warmed shared context mismatch"
+                );
+            }
+        }
+    }
+}
