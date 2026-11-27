@@ -2,7 +2,6 @@ pub(crate) struct ArithmeticDecoder<'a> {
     data: &'a [u8],
     c: u32,
     a: u32,
-    base_pointer: u32,
     shift_count: u32,
 }
 
@@ -12,7 +11,6 @@ impl<'a> ArithmeticDecoder<'a> {
             data,
             c: 0,
             a: 0,
-            base_pointer: 0,
             shift_count: 0,
         };
 
@@ -27,7 +25,8 @@ impl<'a> ArithmeticDecoder<'a> {
     }
 
     fn initialize(&mut self) {
-        self.c = ((self.current_byte() as u32) ^ 0xff) << 16;
+        let b0 = self.data.first().copied().unwrap_or(0xff);
+        self.c = ((b0 as u32) ^ 0xff) << 16;
         self.read_byte();
 
         self.c <<= 7;
@@ -37,25 +36,23 @@ impl<'a> ArithmeticDecoder<'a> {
 
     #[inline(always)]
     fn read_byte(&mut self) {
-        if self.current_byte() == 0xff {
-            let b1 = self.next_byte();
-
-            if b1 > 0x8f {
-                self.shift_count = 8;
+        if let [b0, ref rest @ ..] = *self.data
+            && let [b1, ..] = *rest
+        {
+            if b0 == 0xff {
+                if b1 > 0x8f {
+                    self.shift_count = 8;
+                } else {
+                    self.data = rest;
+                    self.c = self.c.wrapping_add(0xfe00).wrapping_sub((b1 as u32) << 9);
+                    self.shift_count = 7;
+                }
             } else {
-                self.base_pointer += 1;
-                self.c = self
-                    .c
-                    .wrapping_add(0xfe00)
-                    .wrapping_sub((self.current_byte() as u32) << 9);
-                self.shift_count = 7;
+                self.data = rest;
+                self.c = self.c.wrapping_add(0xff00).wrapping_sub((b1 as u32) << 8);
+                self.shift_count = 8;
             }
         } else {
-            self.base_pointer += 1;
-            self.c = self
-                .c
-                .wrapping_add(0xff00)
-                .wrapping_sub((self.current_byte() as u32) << 8);
             self.shift_count = 8;
         }
     }
@@ -106,22 +103,6 @@ impl<'a> ArithmeticDecoder<'a> {
 
         d
     }
-
-    #[inline(always)]
-    fn current_byte(&self) -> u8 {
-        self.data
-            .get(self.base_pointer as usize)
-            .copied()
-            .unwrap_or(0xFF)
-    }
-
-    #[inline(always)]
-    fn next_byte(&self) -> u8 {
-        self.data
-            .get((self.base_pointer + 1) as usize)
-            .copied()
-            .unwrap_or(0xFF)
-    }
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -130,7 +111,7 @@ pub(crate) struct ArithmeticDecoderContext(u8);
 impl ArithmeticDecoderContext {
     #[inline(always)]
     pub(crate) fn index(self) -> u32 {
-        (self.0 & 0x7F) as u32
+        (self.0 & 0x3F) as u32
     }
 
     #[inline(always)]
@@ -183,7 +164,7 @@ macro_rules! qe {
 }
 
 #[rustfmt::skip]
-static QE_TABLE: [QeData; 47] = qe!(
+static QE_TABLE: [QeData; 64] = qe!(
     0x5601, 1, 1, true,
     0x3401, 2, 6, false,
     0x1801, 3, 9, false,
@@ -230,5 +211,22 @@ static QE_TABLE: [QeData; 47] = qe!(
     0x0009, 44, 41, false,
     0x0005, 45, 42, false,
     0x0001, 45, 43, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
+    0x5601, 46, 46, false,
     0x5601, 46, 46, false,
 );
