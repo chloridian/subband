@@ -25,6 +25,19 @@ pub(crate) struct DecodeParams {
     pub(crate) height: u32,
 }
 
+pub(crate) struct DecodeCtx<'a> {
+    pub(crate) codestream: &'a [u8],
+    pub(crate) storage: &'a DecompositionStorage,
+    pub(crate) header: &'a Header,
+    pub(crate) component_info: &'a ComponentInfo,
+    pub(crate) max_layers: Option<u8>,
+    pub(crate) bit_plane_ctx: &'a mut BitPlaneDecodeContext,
+    pub(crate) bit_plane_buffers: &'a mut BitPlaneDecodeBuffers,
+    pub(crate) low_row: &'a mut Vec<f32>,
+    pub(crate) high_row: &'a mut Vec<f32>,
+    pub(crate) cancelled: &'a dyn Fn() -> bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct TileDecompositions {
     pub(crate) first_ll_sub_band: usize,
@@ -137,6 +150,8 @@ pub(crate) fn decode(
     let mut storage = DecompositionStorage::default();
     let mut bit_plane_ctx = BitPlaneDecodeContext::default();
     let mut bit_plane_buffers = BitPlaneDecodeBuffers::default();
+    let mut low_row = Vec::new();
+    let mut high_row = Vec::new();
     let mut received_packets = Vec::new();
     let mut expected_packets = Vec::new();
 
@@ -192,19 +207,19 @@ pub(crate) fn decode(
             cancelled,
         )?;
 
-        idwt::apply_tile(
-            data,
-            &storage,
-            tile_rect,
-            component_infos,
-            tile_mct,
-            &mut bit_plane_ctx,
-            &mut bit_plane_buffers,
+        let mut ctx = DecodeCtx {
+            codestream: data,
+            storage: &storage,
             header,
-            params,
-            out,
+            component_info: first_ci,
+            max_layers: params.max_layers,
+            bit_plane_ctx: &mut bit_plane_ctx,
+            bit_plane_buffers: &mut bit_plane_buffers,
+            low_row: &mut low_row,
+            high_row: &mut high_row,
             cancelled,
-        )?;
+        };
+        idwt::apply_tile(&mut ctx, tile_rect, component_infos, tile_mct, params, out)?;
 
         update_layers_received(
             tile,
@@ -299,20 +314,17 @@ fn update_layers_received(
 }
 
 pub(crate) fn decode_sub_band_strip(
-    codestream: &[u8],
+    ctx: &mut DecodeCtx<'_>,
     sub_band_idx: usize,
     resolution: u8,
-    component_info: &ComponentInfo,
-    bit_plane_ctx: &mut BitPlaneDecodeContext,
-    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-    storage: &DecompositionStorage,
-    header: &Header,
-    max_layers: Option<u8>,
-    abs_y0: u32,
-    abs_y1: u32,
+    y_range: Range<u32>,
     dst: &mut Vec<f32>,
-    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
+    let storage = ctx.storage;
+    let component_info = ctx.component_info;
+    let abs_y0 = y_range.start;
+    let abs_y1 = y_range.end;
+
     let sub_band = storage
         .sub_bands
         .get(sub_band_idx)
@@ -328,7 +340,7 @@ pub(crate) fn decode_sub_band_strip(
         .checked_mul(strip_height)
         .ok_or(DecodeError::TooLarge)?;
     if dst.len() < strip_len {
-        check_cancelled(cancelled)?;
+        check_cancelled(ctx.cancelled)?;
         dst.resize(strip_len, 0.0);
     }
 
@@ -403,23 +415,23 @@ pub(crate) fn decode_sub_band_strip(
                 continue;
             }
 
-            check_cancelled(cancelled)?;
+            check_cancelled(ctx.cancelled)?;
 
             let x_offset = code_block.rect.x0 - sub_band.rect.x0;
             let y_offset = code_block.rect.y0 - abs_y0;
             let mut base_idx = (y_offset as usize) * sb_width + x_offset as usize;
 
             if !bitplane::decode(
-                codestream,
+                ctx.codestream,
                 code_block,
                 sub_band.sub_band_type,
                 num_bitplanes,
                 &component_info.coding_style.parameters.code_block_style,
-                bit_plane_ctx,
-                bit_plane_buffers,
+                ctx.bit_plane_ctx,
+                ctx.bit_plane_buffers,
                 storage,
-                max_layers,
-                header.strict,
+                ctx.max_layers,
+                ctx.header.strict,
             )? {
                 let cb_w = code_block.rect.width() as usize;
                 let cb_h = code_block.rect.height() as usize;
@@ -434,7 +446,7 @@ pub(crate) fn decode_sub_band_strip(
                 continue;
             }
 
-            bit_plane_ctx.write_reconstructed(
+            ctx.bit_plane_ctx.write_reconstructed(
                 dst,
                 base_idx,
                 sb_width,
