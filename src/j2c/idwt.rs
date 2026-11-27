@@ -1,10 +1,9 @@
-use std::vec;
 use std::vec::Vec;
 
 use super::bitplane::{BitPlaneDecodeBuffers, BitPlaneDecodeContext};
 use super::build::Decomposition;
 use super::codestream::{ComponentInfo, WaveletTransform};
-use super::decode::{DecompositionStorage, decode_sub_band_strip};
+use super::decode::{DecompositionStorage, decode_sub_band_strip, decode_sub_band_strip_into};
 use super::rect::IntRect;
 use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result};
@@ -14,28 +13,46 @@ use crate::math::{self, Level, SIMD_WIDTH, Simd, dispatch, f32x8};
 #[derive(Default)]
 pub(crate) struct IdwtScratch {
     pub(crate) buffer: Vec<f32>,
+    pub(crate) aux_buffer: Vec<f32>,
     pub(crate) low_row: Vec<f32>,
     pub(crate) high_row: Vec<f32>,
     pub(crate) strip_a: Vec<f32>,
     pub(crate) strip_b: Vec<f32>,
 }
 
-pub(crate) struct IDWTOutput {
-    pub(crate) coefficients: Vec<f32>,
-    pub(crate) rect: IntRect,
+pub(crate) struct OutputPlane<'a> {
+    pub(crate) data: &'a mut [f32],
+    pub(crate) stride: usize,
+    pub(crate) x0: usize,
+    pub(crate) y0: usize,
 }
 
-impl Default for IDWTOutput {
-    fn default() -> Self {
-        Self {
-            coefficients: vec![],
-            rect: IntRect::from_ltrb(0, 0, u32::MAX, u32::MAX),
+impl OutputPlane<'_> {
+    fn target_slice(&mut self, width: usize, height: usize) -> Result<&mut [f32]> {
+        if width == 0 || height == 0 {
+            return Ok(&mut []);
         }
+        if self
+            .x0
+            .checked_add(width)
+            .is_none_or(|end| end > self.stride)
+        {
+            return Err(DecodeError::Malformed);
+        }
+        let start = self
+            .y0
+            .checked_mul(self.stride)
+            .and_then(|y| y.checked_add(self.x0))
+            .ok_or(DecodeError::Malformed)?;
+        let span = (height - 1)
+            .checked_mul(self.stride)
+            .and_then(|y| y.checked_add(width))
+            .ok_or(DecodeError::Malformed)?;
+        self.data
+            .get_mut(start..)
+            .and_then(|s| s.get_mut(..span))
+            .ok_or(DecodeError::Malformed)
     }
-}
-
-struct IDWTTempOutput {
-    rect: IntRect,
 }
 
 pub(crate) fn apply(
@@ -44,12 +61,13 @@ pub(crate) fn apply(
     scratch: &mut IdwtScratch,
     bit_plane_ctx: &mut BitPlaneDecodeContext,
     bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-    output: &mut Vec<f32>,
+    mut output: OutputPlane<'_>,
+    use_output_as_scratch: bool,
     component_idx: usize,
     component_info: &ComponentInfo,
     header: &Header,
     cancel: Cancel<'_>,
-) -> Result<IntRect> {
+) -> Result<()> {
     let tile_decompositions = storage
         .tile_decompositions
         .get(component_idx)
@@ -71,8 +89,12 @@ pub(crate) fn apply(
         .get(tile_decompositions.first_ll_sub_band)
         .ok_or(DecodeError::Malformed)?;
 
-    let Some((first, rest)) = decompositions.split_first() else {
-        decode_sub_band_strip(
+    let Some((last, intermediate)) = decompositions.split_last() else {
+        let width = ll_sub_band.rect.width() as usize;
+        let height = ll_sub_band.rect.height() as usize;
+        let dst_stride = output.stride;
+        let dst = output.target_slice(width, height)?;
+        return decode_sub_band_strip_into(
             codestream,
             tile_decompositions.first_ll_sub_band,
             0,
@@ -83,32 +105,35 @@ pub(crate) fn apply(
             header,
             ll_sub_band.rect.y0,
             ll_sub_band.rect.y1,
-            output,
+            dst,
+            0,
+            dst_stride,
             cancel,
-        )?;
-        return Ok(ll_sub_band.rect);
+        );
     };
 
     let buffer_size = |decomposition: &Decomposition| {
         decomposition.rect.width() as usize * decomposition.rect.height() as usize
     };
 
-    let last = decompositions.last().ok_or(DecodeError::Malformed)?;
-    let last_size = buffer_size(last);
-    if output.capacity() < last_size {
-        output.clear();
-        output.reserve_exact(last_size);
-    }
-
-    if let Some(prev) = decompositions
-        .len()
-        .checked_sub(2)
-        .and_then(|i| decompositions.get(i))
-    {
+    if let Some(prev) = intermediate.last() {
         let prev_size = buffer_size(prev);
         if scratch.buffer.capacity() < prev_size {
             scratch.buffer.clear();
             scratch.buffer.reserve_exact(prev_size);
+        }
+    }
+
+    if !use_output_as_scratch
+        && let Some(prev_prev) = intermediate
+            .len()
+            .checked_sub(2)
+            .and_then(|i| intermediate.get(i))
+    {
+        let prev_prev_size = buffer_size(prev_prev);
+        if scratch.aux_buffer.capacity() < prev_prev_size {
+            scratch.aux_buffer.clear();
+            scratch.aux_buffer.reserve_exact(prev_prev_size);
         }
     }
 
@@ -161,78 +186,214 @@ pub(crate) fn apply(
         cancel,
     )?;
 
-    let mut use_scratch = decompositions.len().is_multiple_of(2);
+    let Some((first, middle)) = intermediate.split_first() else {
+        let width = last.rect.width() as usize;
+        let height = last.rect.height() as usize;
+        let dst_stride = output.stride;
+        let dst = output.target_slice(width, height)?;
+        return filter_2d_first(
+            codestream,
+            dst,
+            dst_stride,
+            &mut scratch.low_row,
+            &mut scratch.high_row,
+            &mut scratch.strip_a,
+            &mut scratch.strip_b,
+            bit_plane_ctx,
+            bit_plane_buffers,
+            last,
+            1,
+            component_info,
+            storage,
+            header,
+            cancel,
+        );
+    };
 
-    let mut temp_output = filter_2d_first(
-        codestream,
+    let mut use_scratch = !intermediate.len().is_multiple_of(2);
+
+    if use_scratch {
+        let len = buffer_size(first);
+        cancel.ensure_len(&mut scratch.buffer, len)?;
+        let dst = scratch
+            .buffer
+            .get_mut(..len)
+            .ok_or(DecodeError::Malformed)?;
+        filter_2d_first(
+            codestream,
+            dst,
+            first.rect.width() as usize,
+            &mut scratch.low_row,
+            &mut scratch.high_row,
+            &mut scratch.strip_a,
+            &mut scratch.strip_b,
+            bit_plane_ctx,
+            bit_plane_buffers,
+            first,
+            1,
+            component_info,
+            storage,
+            header,
+            cancel,
+        )?;
+    } else if use_output_as_scratch {
+        let len = buffer_size(first);
+        let dst = output.data.get_mut(..len).ok_or(DecodeError::Malformed)?;
+        filter_2d_first(
+            codestream,
+            dst,
+            first.rect.width() as usize,
+            &mut scratch.low_row,
+            &mut scratch.high_row,
+            &mut scratch.strip_a,
+            &mut scratch.strip_b,
+            bit_plane_ctx,
+            bit_plane_buffers,
+            first,
+            1,
+            component_info,
+            storage,
+            header,
+            cancel,
+        )?;
+    } else {
+        let len = buffer_size(first);
+        cancel.ensure_len(&mut scratch.aux_buffer, len)?;
+        let dst = scratch
+            .aux_buffer
+            .get_mut(..len)
+            .ok_or(DecodeError::Malformed)?;
+        filter_2d_first(
+            codestream,
+            dst,
+            first.rect.width() as usize,
+            &mut scratch.low_row,
+            &mut scratch.high_row,
+            &mut scratch.strip_a,
+            &mut scratch.strip_b,
+            bit_plane_ctx,
+            bit_plane_buffers,
+            first,
+            1,
+            component_info,
+            storage,
+            header,
+            cancel,
+        )?;
+    }
+
+    for (idx, decomposition) in middle.iter().enumerate() {
+        let resolution = (idx + 2) as u8;
+        use_scratch = !use_scratch;
+        let len = buffer_size(decomposition);
+        let width = decomposition.rect.width() as usize;
+
         if use_scratch {
-            &mut scratch.buffer
+            cancel.ensure_len(&mut scratch.buffer, len)?;
+            let dst = scratch
+                .buffer
+                .get_mut(..len)
+                .ok_or(DecodeError::Malformed)?;
+            let ll: &[f32] = if use_output_as_scratch {
+                output.data
+            } else {
+                &scratch.aux_buffer
+            };
+            filter_2d(
+                codestream,
+                ll,
+                dst,
+                width,
+                &mut scratch.low_row,
+                &mut scratch.high_row,
+                &mut scratch.strip_a,
+                &mut scratch.strip_b,
+                bit_plane_ctx,
+                bit_plane_buffers,
+                decomposition,
+                resolution,
+                component_info,
+                storage,
+                header,
+                cancel,
+            )?;
+        } else if use_output_as_scratch {
+            let dst = output.data.get_mut(..len).ok_or(DecodeError::Malformed)?;
+            filter_2d(
+                codestream,
+                &scratch.buffer,
+                dst,
+                width,
+                &mut scratch.low_row,
+                &mut scratch.high_row,
+                &mut scratch.strip_a,
+                &mut scratch.strip_b,
+                bit_plane_ctx,
+                bit_plane_buffers,
+                decomposition,
+                resolution,
+                component_info,
+                storage,
+                header,
+                cancel,
+            )?;
         } else {
-            output
-        },
+            cancel.ensure_len(&mut scratch.aux_buffer, len)?;
+            let dst = scratch
+                .aux_buffer
+                .get_mut(..len)
+                .ok_or(DecodeError::Malformed)?;
+            filter_2d(
+                codestream,
+                &scratch.buffer,
+                dst,
+                width,
+                &mut scratch.low_row,
+                &mut scratch.high_row,
+                &mut scratch.strip_a,
+                &mut scratch.strip_b,
+                bit_plane_ctx,
+                bit_plane_buffers,
+                decomposition,
+                resolution,
+                component_info,
+                storage,
+                header,
+                cancel,
+            )?;
+        }
+    }
+
+    let last_resolution = decompositions.len() as u8;
+    let last_width = last.rect.width() as usize;
+    let last_height = last.rect.height() as usize;
+    let dst_stride = output.stride;
+    let dst = output.target_slice(last_width, last_height)?;
+
+    filter_2d(
+        codestream,
+        &scratch.buffer,
+        dst,
+        dst_stride,
         &mut scratch.low_row,
         &mut scratch.high_row,
         &mut scratch.strip_a,
         &mut scratch.strip_b,
         bit_plane_ctx,
         bit_plane_buffers,
-        first,
-        1,
+        last,
+        last_resolution,
         component_info,
         storage,
         header,
         cancel,
-    )?;
-
-    for (idx, decomposition) in rest.iter().enumerate() {
-        let resolution = (idx + 2) as u8;
-        use_scratch = !use_scratch;
-
-        temp_output = if use_scratch {
-            filter_2d(
-                codestream,
-                output,
-                &mut scratch.buffer,
-                &mut scratch.low_row,
-                &mut scratch.high_row,
-                &mut scratch.strip_a,
-                &mut scratch.strip_b,
-                bit_plane_ctx,
-                bit_plane_buffers,
-                decomposition,
-                resolution,
-                component_info,
-                storage,
-                header,
-                cancel,
-            )?
-        } else {
-            filter_2d(
-                codestream,
-                &scratch.buffer,
-                output,
-                &mut scratch.low_row,
-                &mut scratch.high_row,
-                &mut scratch.strip_a,
-                &mut scratch.strip_b,
-                bit_plane_ctx,
-                bit_plane_buffers,
-                decomposition,
-                resolution,
-                component_info,
-                storage,
-                header,
-                cancel,
-            )?
-        };
-    }
-
-    Ok(temp_output.rect)
+    )
 }
 
 fn filter_2d_first(
     codestream: &[u8],
-    coefficients: &mut Vec<f32>,
+    coefficients: &mut [f32],
+    dst_stride: usize,
     low_row: &mut Vec<f32>,
     high_row: &mut Vec<f32>,
     strip_a: &mut Vec<f32>,
@@ -245,15 +406,11 @@ fn filter_2d_first(
     storage: &DecompositionStorage,
     header: &Header,
     cancel: Cancel<'_>,
-) -> Result<IDWTTempOutput> {
+) -> Result<()> {
     let width = decomposition.rect.width() as usize;
     let height = decomposition.rect.height() as usize;
-    assert!(coefficients.capacity() >= width * height);
-    cancel.resize(coefficients, width * height)?;
     if width == 0 || height == 0 {
-        return Ok(IDWTTempOutput {
-            rect: decomposition.rect,
-        });
+        return Ok(());
     }
 
     dispatch!(Level::new(), simd => {
@@ -285,6 +442,7 @@ fn filter_2d_first(
             high_row,
             coefficients,
             width,
+            dst_stride,
             first_low_row,
             u0.is_multiple_of(2),
             num_low,
@@ -309,6 +467,7 @@ fn filter_2d_first(
             high_row,
             coefficients,
             width,
+            dst_stride,
             first_high_row,
             u0.is_multiple_of(2),
             num_low,
@@ -316,18 +475,22 @@ fn filter_2d_first(
             transform,
             cancel,
         )?;
-        filter_vertical(simd, coefficients, decomposition.rect, transform, cancel)
-    })?;
-
-    Ok(IDWTTempOutput {
-        rect: decomposition.rect,
+        filter_vertical(
+            simd,
+            coefficients,
+            dst_stride,
+            decomposition.rect,
+            transform,
+            cancel,
+        )
     })
 }
 
 fn filter_2d(
     codestream: &[u8],
     ll: &[f32],
-    coefficients: &mut Vec<f32>,
+    coefficients: &mut [f32],
+    dst_stride: usize,
     low_row: &mut Vec<f32>,
     high_row: &mut Vec<f32>,
     strip_a: &mut Vec<f32>,
@@ -340,15 +503,11 @@ fn filter_2d(
     storage: &DecompositionStorage,
     header: &Header,
     cancel: Cancel<'_>,
-) -> Result<IDWTTempOutput> {
+) -> Result<()> {
     let width = decomposition.rect.width() as usize;
     let height = decomposition.rect.height() as usize;
-    assert!(coefficients.capacity() >= width * height);
-    cancel.resize(coefficients, width * height)?;
     if width == 0 || height == 0 {
-        return Ok(IDWTTempOutput {
-            rect: decomposition.rect,
-        });
+        return Ok(());
     }
 
     dispatch!(Level::new(), simd => {
@@ -380,6 +539,7 @@ fn filter_2d(
             high_row,
             coefficients,
             width,
+            dst_stride,
             first_low_row,
             u0.is_multiple_of(2),
             num_low,
@@ -404,6 +564,7 @@ fn filter_2d(
             high_row,
             coefficients,
             width,
+            dst_stride,
             first_high_row,
             u0.is_multiple_of(2),
             num_low,
@@ -411,11 +572,14 @@ fn filter_2d(
             transform,
             cancel,
         )?;
-        filter_vertical(simd, coefficients, decomposition.rect, transform, cancel)
-    })?;
-
-    Ok(IDWTTempOutput {
-        rect: decomposition.rect,
+        filter_vertical(
+            simd,
+            coefficients,
+            dst_stride,
+            decomposition.rect,
+            transform,
+            cancel,
+        )
     })
 }
 
@@ -436,6 +600,7 @@ fn filter_low_rows_streaming<S: Simd>(
     high_row: &mut Vec<f32>,
     coefficients: &mut [f32],
     width: usize,
+    dst_stride: usize,
     first_row: usize,
     low_first: bool,
     num_low: usize,
@@ -451,7 +616,7 @@ fn filter_low_rows_streaming<S: Simd>(
     let y1 = hl_sb.rect.y1;
     let cb_height = hl_sb.cb_height;
     let mut filter =
-        HorizontalFilter::new(transform, low_first, num_low, num_high, low_row, high_row);
+        HorizontalFilter::new(transform, low_first, num_low, num_high, low_row, high_row)?;
 
     let mut abs_y = y0;
     while abs_y < y1 {
@@ -486,11 +651,11 @@ fn filter_low_rows_streaming<S: Simd>(
             simd,
             ll_slice,
             hl_strip,
-            coefficients
-                .chunks_exact_mut(width)
-                .skip(first_row + v_start * 2)
-                .step_by(2)
-                .take(strip_h),
+            coefficients,
+            width,
+            dst_stride,
+            first_row + v_start * 2,
+            strip_h,
             cancel,
         )?;
 
@@ -518,6 +683,7 @@ fn filter_high_rows_streaming<S: Simd>(
     high_row: &mut Vec<f32>,
     coefficients: &mut [f32],
     width: usize,
+    dst_stride: usize,
     first_row: usize,
     low_first: bool,
     num_low: usize,
@@ -533,7 +699,7 @@ fn filter_high_rows_streaming<S: Simd>(
     let y1 = lh_sb.rect.y1;
     let cb_height = lh_sb.cb_height;
     let mut filter =
-        HorizontalFilter::new(transform, low_first, num_low, num_high, low_row, high_row);
+        HorizontalFilter::new(transform, low_first, num_low, num_high, low_row, high_row)?;
 
     let mut abs_y = y0;
     while abs_y < y1 {
@@ -575,11 +741,11 @@ fn filter_high_rows_streaming<S: Simd>(
             simd,
             lh_strip,
             hh_strip,
-            coefficients
-                .chunks_exact_mut(width)
-                .skip(first_row + v_start * 2)
-                .step_by(2)
-                .take(strip_h),
+            coefficients,
+            width,
+            dst_stride,
+            first_row + v_start * 2,
+            strip_h,
             cancel,
         )?;
 
@@ -594,8 +760,8 @@ struct HorizontalFilter<'a> {
     low_first: bool,
     num_low: usize,
     num_high: usize,
-    low: &'a mut Vec<f32>,
-    high: &'a mut Vec<f32>,
+    low: &'a mut [f32],
+    high: &'a mut [f32],
 }
 
 impl<'a> HorizontalFilter<'a> {
@@ -606,32 +772,47 @@ impl<'a> HorizontalFilter<'a> {
         num_high: usize,
         low: &'a mut Vec<f32>,
         high: &'a mut Vec<f32>,
-    ) -> Self {
-        low.clear();
-        low.resize(num_low + 2, 0.0);
-        high.clear();
-        high.resize(num_high + 2, 0.0);
-        Self {
+    ) -> Result<Self> {
+        let low_len = num_low + 2;
+        if low.len() < low_len {
+            low.resize(low_len, 0.0);
+        }
+        let high_len = num_high + 2;
+        if high.len() < high_len {
+            high.resize(high_len, 0.0);
+        }
+        let low = low.get_mut(..low_len).ok_or(DecodeError::Malformed)?;
+        let high = high.get_mut(..high_len).ok_or(DecodeError::Malformed)?;
+        Ok(Self {
             transform,
             low_first,
             num_low,
             num_high,
             low,
             high,
-        }
+        })
     }
 
     #[inline(always)]
-    fn filter_rows<'b, S: Simd>(
+    fn filter_rows<S: Simd>(
         &mut self,
         simd: S,
         low_band: &[f32],
         high_band: &[f32],
-        rows: impl Iterator<Item = &'b mut [f32]>,
+        coefficients: &mut [f32],
+        width: usize,
+        dst_stride: usize,
+        start_row: usize,
+        strip_h: usize,
         cancel: Cancel<'_>,
     ) -> Result<()> {
-        for (v, row) in rows.enumerate() {
+        for v in 0..strip_h {
             cancel.check()?;
+
+            let row = coefficients
+                .get_mut((start_row + v * 2) * dst_stride..)
+                .and_then(|s| s.get_mut(..width))
+                .ok_or(DecodeError::Malformed)?;
 
             let low_dst = self
                 .low
@@ -796,6 +977,7 @@ fn interleave_row<S: Simd>(simd: S, first: &[f32], second: &[f32], output: &mut 
 fn filter_vertical<S: Simd>(
     simd: S,
     coefficients: &mut [f32],
+    stride: usize,
     rect: IntRect,
     transform: WaveletTransform,
     cancel: Cancel<'_>,
@@ -804,6 +986,7 @@ fn filter_vertical<S: Simd>(
         cancel,
         coefficients,
         width: rect.width() as usize,
+        stride,
         height: rect.height() as usize,
         low_first: rect.y0.is_multiple_of(2),
     };
@@ -815,6 +998,7 @@ struct VerticalFilter<'a> {
     cancel: Cancel<'a>,
     coefficients: &'a mut [f32],
     width: usize,
+    stride: usize,
     height: usize,
     low_first: bool,
 }
@@ -822,15 +1006,15 @@ struct VerticalFilter<'a> {
 impl VerticalFilter<'_> {
     #[inline(always)]
     fn scale_rows<S: Simd>(&mut self, simd: S, first_row: usize, factor: f32) -> Result<()> {
-        for row in self
-            .coefficients
-            .chunks_exact_mut(self.width)
-            .skip(first_row)
-            .step_by(2)
-        {
+        for row in (first_row..self.height).step_by(2) {
             self.cancel.check()?;
 
-            scale(simd, row, factor);
+            let slice = self
+                .coefficients
+                .get_mut(row * self.stride..)
+                .and_then(|s| s.get_mut(..self.width))
+                .ok_or(DecodeError::Malformed)?;
+            scale(simd, slice, factor);
         }
 
         Ok(())
@@ -845,6 +1029,7 @@ impl VerticalFilter<'_> {
         f_scalar: impl Fn(f32, f32, f32) -> f32,
     ) -> Result<()> {
         let width = self.width;
+        let stride = self.stride;
         let height = self.height;
 
         for row in (first_row..height).step_by(2) {
@@ -857,17 +1042,17 @@ impl VerticalFilter<'_> {
                 row + 1
             };
 
-            let (rows_before, rest) = self.coefficients.split_at_mut(row * width);
+            let (rows_before, rest) = self.coefficients.split_at_mut(row * stride);
             let (current, rows_after) = rest.split_at_mut(width);
             let neighbor = |r: usize| -> Result<&[f32]> {
                 if r < row {
                     rows_before
-                        .get(r * width..)
+                        .get(r * stride..)
                         .and_then(|s| s.get(..width))
                         .ok_or(DecodeError::Malformed)
                 } else {
                     rows_after
-                        .get((r - row - 1) * width..)
+                        .get((r - row) * stride - width..)
                         .and_then(|s| s.get(..width))
                         .ok_or(DecodeError::Malformed)
                 }
