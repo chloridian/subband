@@ -982,16 +982,353 @@ fn filter_vertical<S: Simd>(
     transform: WaveletTransform,
     cancel: Cancel<'_>,
 ) -> Result<()> {
+    let width = rect.width() as usize;
+    let height = rect.height() as usize;
+    let low_first = rect.y0.is_multiple_of(2);
+
+    if low_first {
+        match transform {
+            WaveletTransform::Reversible53 if height >= 4 => {
+                return filter_vertical_53r_fused(
+                    simd,
+                    coefficients,
+                    width,
+                    stride,
+                    height,
+                    cancel,
+                );
+            }
+            WaveletTransform::Irreversible97 if height >= 8 => {
+                return filter_vertical_97i_fused(
+                    simd,
+                    coefficients,
+                    width,
+                    stride,
+                    height,
+                    cancel,
+                );
+            }
+            _ => {}
+        }
+    }
+
     let mut filter = VerticalFilter {
         cancel,
         coefficients,
-        width: rect.width() as usize,
+        width,
         stride,
-        height: rect.height() as usize,
-        low_first: rect.y0.is_multiple_of(2),
+        height,
+        low_first,
     };
 
     filter_1d(simd, transform, &mut filter)
+}
+
+#[inline(always)]
+fn scale_row<S: Simd>(
+    simd: S,
+    coefficients: &mut [f32],
+    width: usize,
+    stride: usize,
+    row: usize,
+    factor: f32,
+) -> Result<()> {
+    let slice = coefficients
+        .get_mut(row * stride..)
+        .and_then(|s| s.get_mut(..width))
+        .ok_or(DecodeError::Malformed)?;
+    scale(simd, slice, factor);
+    Ok(())
+}
+
+#[inline(always)]
+fn lift_row<S: Simd>(
+    simd: S,
+    coefficients: &mut [f32],
+    width: usize,
+    stride: usize,
+    row: usize,
+    above: usize,
+    below: usize,
+    f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
+    f_scalar: impl Fn(f32, f32, f32) -> f32,
+) -> Result<()> {
+    let (rows_before, rest) = coefficients.split_at_mut(row * stride);
+    let (current, rows_after) = rest.split_at_mut(width);
+    let neighbor = |r: usize| -> Result<&[f32]> {
+        if r < row {
+            rows_before
+                .get(r * stride..)
+                .and_then(|s| s.get(..width))
+                .ok_or(DecodeError::Malformed)
+        } else {
+            rows_after
+                .get((r - row) * stride - width..)
+                .and_then(|s| s.get(..width))
+                .ok_or(DecodeError::Malformed)
+        }
+    };
+
+    lift_samples(
+        simd,
+        current,
+        neighbor(above)?,
+        neighbor(below)?,
+        f_simd,
+        f_scalar,
+    );
+    Ok(())
+}
+
+#[inline(always)]
+fn filter_vertical_53r_fused<S: Simd>(
+    simd: S,
+    coefficients: &mut [f32],
+    width: usize,
+    stride: usize,
+    height: usize,
+    cancel: Cancel<'_>,
+) -> Result<()> {
+    let lift_low_simd =
+        |s: f32x8<S>, left: f32x8<S>, right: f32x8<S>| s - ((left + right + 2.0) * 0.25).floor();
+    let lift_low_scalar =
+        |s: f32, left: f32, right: f32| s - math::mul_add(left + right, 0.25, 0.5).floor();
+    let lift_high_simd =
+        |s: f32x8<S>, left: f32x8<S>, right: f32x8<S>| s + ((left + right) * 0.5).floor();
+    let lift_high_scalar = |s: f32, left: f32, right: f32| s + ((left + right) * 0.5).floor();
+
+    lift_row(
+        simd,
+        coefficients,
+        width,
+        stride,
+        0,
+        1,
+        1,
+        lift_low_simd,
+        lift_low_scalar,
+    )?;
+
+    for even in (2..height).step_by(2) {
+        cancel.check()?;
+        let below = if even + 1 < height {
+            even + 1
+        } else {
+            even - 1
+        };
+        lift_row(
+            simd,
+            coefficients,
+            width,
+            stride,
+            even,
+            even - 1,
+            below,
+            lift_low_simd,
+            lift_low_scalar,
+        )?;
+        lift_row(
+            simd,
+            coefficients,
+            width,
+            stride,
+            even - 1,
+            even - 2,
+            even,
+            lift_high_simd,
+            lift_high_scalar,
+        )?;
+    }
+
+    if height.is_multiple_of(2) {
+        let last_odd = height - 1;
+        lift_row(
+            simd,
+            coefficients,
+            width,
+            stride,
+            last_odd,
+            last_odd - 1,
+            last_odd - 1,
+            lift_high_simd,
+            lift_high_scalar,
+        )?;
+    }
+
+    Ok(())
+}
+
+#[inline(always)]
+fn filter_vertical_97i_fused<S: Simd>(
+    simd: S,
+    coefficients: &mut [f32],
+    width: usize,
+    stride: usize,
+    height: usize,
+    cancel: Cancel<'_>,
+) -> Result<()> {
+    const NEG_ALPHA: f32 = 1.586_134_3;
+    const NEG_BETA: f32 = 0.052_980_117;
+    const NEG_GAMMA: f32 = -0.882_911_1;
+    const NEG_DELTA: f32 = -0.443_506_87;
+    const KAPPA: f32 = 1.230_174_1;
+    const INV_KAPPA: f32 = 1.0 / KAPPA;
+
+    let neg_alpha = f32x8::splat(simd, NEG_ALPHA);
+    let neg_beta = f32x8::splat(simd, NEG_BETA);
+    let neg_gamma = f32x8::splat(simd, NEG_GAMMA);
+    let neg_delta = f32x8::splat(simd, NEG_DELTA);
+
+    let delta_simd = |s: f32x8<S>, l: f32x8<S>, r: f32x8<S>| (l + r).mul_add(neg_delta, s);
+    let delta_scalar = |s: f32, l: f32, r: f32| math::mul_add(l + r, NEG_DELTA, s);
+    let gamma_simd = |s: f32x8<S>, l: f32x8<S>, r: f32x8<S>| (l + r).mul_add(neg_gamma, s);
+    let gamma_scalar = |s: f32, l: f32, r: f32| math::mul_add(l + r, NEG_GAMMA, s);
+    let beta_simd = |s: f32x8<S>, l: f32x8<S>, r: f32x8<S>| (l + r).mul_add(neg_beta, s);
+    let beta_scalar = |s: f32, l: f32, r: f32| math::mul_add(l + r, NEG_BETA, s);
+    let alpha_simd = |s: f32x8<S>, l: f32x8<S>, r: f32x8<S>| (l + r).mul_add(neg_alpha, s);
+    let alpha_scalar = |s: f32, l: f32, r: f32| math::mul_add(l + r, NEG_ALPHA, s);
+
+    for even in (0..height).step_by(2) {
+        cancel.check()?;
+        scale_row(simd, coefficients, width, stride, even, KAPPA)?;
+        if even + 1 < height {
+            scale_row(simd, coefficients, width, stride, even + 1, INV_KAPPA)?;
+        }
+
+        let above = if even == 0 { 1 } else { even - 1 };
+        let below = if even + 1 < height {
+            even + 1
+        } else {
+            even - 1
+        };
+        lift_row(
+            simd,
+            coefficients,
+            width,
+            stride,
+            even,
+            above,
+            below,
+            delta_simd,
+            delta_scalar,
+        )?;
+
+        if even >= 2 {
+            lift_row(
+                simd,
+                coefficients,
+                width,
+                stride,
+                even - 1,
+                even - 2,
+                even,
+                gamma_simd,
+                gamma_scalar,
+            )?;
+
+            let beta_row = even - 2;
+            let beta_above = if beta_row == 0 { 1 } else { beta_row - 1 };
+            lift_row(
+                simd,
+                coefficients,
+                width,
+                stride,
+                beta_row,
+                beta_above,
+                beta_row + 1,
+                beta_simd,
+                beta_scalar,
+            )?;
+        }
+
+        if even >= 4 {
+            lift_row(
+                simd,
+                coefficients,
+                width,
+                stride,
+                even - 3,
+                even - 4,
+                even - 2,
+                alpha_simd,
+                alpha_scalar,
+            )?;
+        }
+    }
+
+    let last_even = (height - 1) & !1;
+    if height.is_multiple_of(2) {
+        let last_odd = height - 1;
+        lift_row(
+            simd,
+            coefficients,
+            width,
+            stride,
+            last_odd,
+            last_even,
+            last_even,
+            gamma_simd,
+            gamma_scalar,
+        )?;
+        lift_row(
+            simd,
+            coefficients,
+            width,
+            stride,
+            last_even,
+            last_even - 1,
+            last_odd,
+            beta_simd,
+            beta_scalar,
+        )?;
+        lift_row(
+            simd,
+            coefficients,
+            width,
+            stride,
+            last_even - 1,
+            last_even - 2,
+            last_even,
+            alpha_simd,
+            alpha_scalar,
+        )?;
+        lift_row(
+            simd,
+            coefficients,
+            width,
+            stride,
+            last_odd,
+            last_even,
+            last_even,
+            alpha_simd,
+            alpha_scalar,
+        )?;
+    } else {
+        lift_row(
+            simd,
+            coefficients,
+            width,
+            stride,
+            last_even,
+            last_even - 1,
+            last_even - 1,
+            beta_simd,
+            beta_scalar,
+        )?;
+        lift_row(
+            simd,
+            coefficients,
+            width,
+            stride,
+            last_even - 1,
+            last_even - 2,
+            last_even,
+            alpha_simd,
+            alpha_scalar,
+        )?;
+    }
+
+    Ok(())
 }
 
 struct VerticalFilter<'a> {
@@ -1008,13 +1345,14 @@ impl VerticalFilter<'_> {
     fn scale_rows<S: Simd>(&mut self, simd: S, first_row: usize, factor: f32) -> Result<()> {
         for row in (first_row..self.height).step_by(2) {
             self.cancel.check()?;
-
-            let slice = self
-                .coefficients
-                .get_mut(row * self.stride..)
-                .and_then(|s| s.get_mut(..self.width))
-                .ok_or(DecodeError::Malformed)?;
-            scale(simd, slice, factor);
+            scale_row(
+                simd,
+                self.coefficients,
+                self.width,
+                self.stride,
+                row,
+                factor,
+            )?;
         }
 
         Ok(())
@@ -1042,30 +1380,17 @@ impl VerticalFilter<'_> {
                 row + 1
             };
 
-            let (rows_before, rest) = self.coefficients.split_at_mut(row * stride);
-            let (current, rows_after) = rest.split_at_mut(width);
-            let neighbor = |r: usize| -> Result<&[f32]> {
-                if r < row {
-                    rows_before
-                        .get(r * stride..)
-                        .and_then(|s| s.get(..width))
-                        .ok_or(DecodeError::Malformed)
-                } else {
-                    rows_after
-                        .get((r - row) * stride - width..)
-                        .and_then(|s| s.get(..width))
-                        .ok_or(DecodeError::Malformed)
-                }
-            };
-
-            lift_samples(
+            lift_row(
                 simd,
-                current,
-                neighbor(above)?,
-                neighbor(below)?,
+                self.coefficients,
+                width,
+                stride,
+                row,
+                above,
+                below,
                 &f_simd,
                 &f_scalar,
-            );
+            )?;
         }
 
         Ok(())
