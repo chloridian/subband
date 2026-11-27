@@ -565,10 +565,6 @@ impl<const N: usize> SimdBuffer<N> {
         self.data.get(..self.original_len).unwrap_or(&self.data)
     }
 
-    pub(crate) fn as_vec_mut(&mut self) -> &mut Vec<f32> {
-        &mut self.data
-    }
-
     pub(crate) fn restore_padding(&mut self) {
         let padded_len = Self::padded_len(self.original_len);
         if let Some(pad) = self.data.get_mut(self.original_len..padded_len) {
