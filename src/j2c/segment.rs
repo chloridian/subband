@@ -33,6 +33,7 @@ pub(crate) fn parse(
     tile: &Tile,
     mut progression_iterator: ProgressionIterator<'_>,
     header: &Header,
+    skipped_resolution_levels: u8,
     storage: &mut DecompositionStorage,
     received_packets: &mut [u64],
     decoded_resolutions: usize,
@@ -41,7 +42,7 @@ pub(crate) fn parse(
     let num_layers = usize::from(tile.num_layers);
     let component_infos = tile.component_infos(header);
     let stop_at_discard = can_stop_at_discard(tile, header);
-    let max_res = max_decoded_resolutions(tile, header)?;
+    let max_res = max_decoded_resolutions(tile, header, skipped_resolution_levels)?;
 
     for tile_part_data in &tile.tile_parts {
         let tile_part = tile_part_data
@@ -55,7 +56,7 @@ pub(crate) fn parse(
             received_packets,
             decoded_resolutions,
             num_layers,
-            header.skipped_resolution_levels,
+            skipped_resolution_levels,
             stop_at_discard,
             max_res,
             cancel,

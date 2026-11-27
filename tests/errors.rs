@@ -43,6 +43,7 @@ fn too_few_exponents() {
     check_error(
         "errors_too_few_exponents",
         DecodeSettings::default(),
+        Decode::default(),
         "malformed codestream",
     );
 }
@@ -51,9 +52,10 @@ fn too_few_exponents() {
 fn reduced_below_tile_levels() {
     check_error(
         "codestream_tile_cod_fewer_levels",
-        DecodeSettings {
+        DecodeSettings::default(),
+        Decode {
             discard: 2,
-            ..Default::default()
+            ..Decode::default()
         },
         "malformed codestream",
     );
@@ -64,6 +66,7 @@ fn jp2_invalid_codestream() {
     check_error(
         "errors_jp2_invalid_codestream",
         DecodeSettings::default(),
+        Decode::default(),
         "malformed codestream",
     );
 }
@@ -146,7 +149,11 @@ fn stream(name: &str) -> Vec<u8> {
 
 fn too_large(data: &[u8], settings: &DecodeSettings) {
     let err = Image::new(data, settings)
-        .and_then(|image| image.decode(&mut DecoderContext::default()).map(drop))
+        .and_then(|image| {
+            let request = Decode::default();
+            let mut buf = vec![0; image.output_len(&request)];
+            image.decode_into(&request, &mut buf, || false).map(drop)
+        })
         .expect_err("limit should reject");
     assert_eq!(err, DecodeError::TooLarge);
 }

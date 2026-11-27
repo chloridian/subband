@@ -17,7 +17,7 @@ mod wavelet;
 use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::PathBuf;
-use subband::{DecodeSettings, DecoderContext, Image};
+use subband::{Decode, DecodeSettings, Image};
 
 fn tests_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
@@ -120,33 +120,39 @@ fn read_stream(stream: &str) -> Vec<u8> {
     fs::read(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
-fn decode(stream: &str, settings: &DecodeSettings) -> Result<Decoded, String> {
+fn decode(stream: &str, settings: &DecodeSettings, request: &Decode) -> Result<Decoded, String> {
     let data = read_stream(stream);
     let image = Image::new(&data, settings).map_err(|e| e.to_string())?;
-    let (width, height) = (image.width(), image.height());
-    let mut ctx = DecoderContext::default();
-    let decoded = image.decode(&mut ctx).map_err(|e| e.to_string())?;
+    let mut samples = vec![0; image.output_len(request)];
+    let decoded = image
+        .decode_into(request, &mut samples, || false)
+        .map_err(|e| e.to_string())?;
 
     Ok(Decoded {
-        width,
-        height,
+        width: decoded.width(),
+        height: decoded.height(),
         channels: usize::from(decoded.components()),
-        samples: decoded.data_u8().map_err(|e| e.to_string())?,
+        samples,
     })
 }
 
 fn check(stream: &str, expected: Reference) {
-    check_with(stream, DecodeSettings::default(), expected);
+    check_with(
+        stream,
+        DecodeSettings::default(),
+        Decode::default(),
+        expected,
+    );
 }
 
-fn check_with(stream: &str, settings: DecodeSettings, expected: Reference) {
-    let actual =
-        decode(stream, &settings).unwrap_or_else(|e| panic!("{stream}: decoding failed: {e}"));
+fn check_with(stream: &str, settings: DecodeSettings, request: Decode, expected: Reference) {
+    let actual = decode(stream, &settings, &request)
+        .unwrap_or_else(|e| panic!("{stream}: decoding failed: {e}"));
     expected.compare(stream, &actual);
 }
 
-fn check_error(stream: &str, settings: DecodeSettings, message: &str) {
-    match decode(stream, &settings) {
+fn check_error(stream: &str, settings: DecodeSettings, request: Decode, message: &str) {
+    match decode(stream, &settings, &request) {
         Ok(_) => panic!("{stream}: decoding succeeded, but should have failed"),
         Err(e) => assert!(
             e.contains(message),

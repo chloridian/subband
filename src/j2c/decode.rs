@@ -3,24 +3,36 @@ use std::vec::Vec;
 
 use super::bitplane::{BitPlaneDecodeBuffers, BitPlaneDecodeContext};
 use super::build::{CodeBlock, Decomposition, Layer, Precinct, Segment, SubBand, SubBandType};
-use super::codestream::{ComponentInfo, Header, QuantizationStyle, WaveletTransform};
+use super::codestream::{
+    ComponentInfo, Header, MAX_RESOLUTIONS, QuantizationStyle, WaveletTransform,
+};
 use super::idwt::{IdwtScratch, OutputPlane};
 use super::progression::{ProgressionIterator, progression_iterator};
 use super::tag_tree::TagNode;
 use super::tile::{ComponentTile, ResolutionTile, Tile};
 use super::{ComponentData, bitplane, build, idwt, mct, segment, tile};
+use crate::Decoded;
 use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result, bail};
 use crate::j2c::segment::MAX_BITPLANE_COUNT;
 use crate::math::{self, SimdBuffer};
 use crate::reader::BitReader;
 
+#[derive(Clone, Copy)]
+pub(crate) struct DecodeParams {
+    pub(crate) skipped_resolution_levels: u8,
+    pub(crate) max_layers: Option<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
 pub(crate) fn decode(
     data: &[u8],
     header: &Header,
+    params: DecodeParams,
     ctx: &mut DecoderContext,
     cancel: Cancel<'_>,
-) -> Result<()> {
+) -> Result<Decoded> {
     let mut reader = BitReader::new(data);
     let tile_count = tile::parse(&mut reader, header, &mut ctx.tiles)?;
     if tile_count == 0 {
@@ -35,20 +47,22 @@ pub(crate) fn decode(
         || !first_tile
             .component_infos(header)
             .iter()
-            .all(|ci| is_full_image_tile(first_tile, ci, header));
+            .all(|ci| is_full_image_tile(first_tile, ci, params));
 
-    ctx.reset(header, num_components, zero_channels, cancel)?;
+    ctx.reset(params, num_components, zero_channels, cancel)?;
 
-    let decoded_resolutions = usize::from(header.levels - header.skipped_resolution_levels) + 1;
-    ctx.layers_received.clear();
-    ctx.layers_received.resize(decoded_resolutions, u8::MAX);
+    let decoded_resolutions = usize::from(header.levels - params.skipped_resolution_levels) + 1;
+    let mut layers_received = [u8::MAX; MAX_RESOLUTIONS];
+    let layers_slice = layers_received
+        .get_mut(..decoded_resolutions)
+        .ok_or(DecodeError::Malformed)?;
 
     let tiles = ctx.tiles.get(..tile_count).ok_or(DecodeError::Malformed)?;
     for tile in tiles {
         cancel.check()?;
 
         if tile.tile_parts.is_empty() {
-            ctx.layers_received.fill(0);
+            layers_slice.fill(0);
             continue;
         }
 
@@ -67,6 +81,7 @@ pub(crate) fn decode(
             data,
             tile,
             header,
+            params,
             progression_iterator,
             &mut ctx.tile_decode_context,
             channel_data,
@@ -79,10 +94,11 @@ pub(crate) fn decode(
         update_layers_received(
             tile,
             header,
+            params.max_layers,
             decoded_resolutions,
             &ctx.received_packets,
             &mut ctx.expected_packets,
-            &mut ctx.layers_received,
+            layers_slice,
         )?;
     }
 
@@ -103,21 +119,26 @@ pub(crate) fn decode(
 
     apply_sign_shift(channel_data, cancel)?;
 
-    Ok(())
+    Ok(Decoded::new(
+        params.width,
+        params.height,
+        num_components as u8,
+        layers_received,
+        decoded_resolutions as u8,
+    ))
 }
 
 fn update_layers_received(
     tile: &Tile,
     header: &Header,
+    max_layers: Option<u8>,
     decoded_resolutions: usize,
     received_packets: &[u64],
     expected_packets: &mut Vec<u64>,
     layers_received: &mut [u8],
 ) -> Result<()> {
     let num_layers = usize::from(tile.num_layers);
-    let effective_layers = header
-        .max_layers
-        .map_or(tile.num_layers, |m| m.min(tile.num_layers));
+    let effective_layers = max_layers.map_or(tile.num_layers, |m| m.min(tile.num_layers));
 
     expected_packets.clear();
     expected_packets.resize(decoded_resolutions * num_layers, 0);
@@ -147,11 +168,10 @@ fn update_layers_received(
 }
 
 #[derive(Default)]
-pub struct DecoderContext {
+pub(crate) struct DecoderContext {
     tiles: Vec<Tile>,
     tile_decode_context: TileDecodeContext,
     pub(crate) channel_data: Vec<ComponentData>,
-    pub(crate) layers_received: Vec<u8>,
     received_packets: Vec<u64>,
     expected_packets: Vec<u64>,
     storage: DecompositionStorage,
@@ -160,7 +180,7 @@ pub struct DecoderContext {
 impl DecoderContext {
     fn reset(
         &mut self,
-        header: &Header,
+        params: DecodeParams,
         num_components: usize,
         zero_channels: bool,
         cancel: Cancel<'_>,
@@ -168,8 +188,8 @@ impl DecoderContext {
         self.tile_decode_context.reset();
         self.storage.reset();
 
-        let sample_count = (header.size_data.image_width() as usize)
-            .checked_mul(header.size_data.image_height() as usize)
+        let sample_count = (params.width as usize)
+            .checked_mul(params.height as usize)
             .ok_or(DecodeError::TooLarge)?;
         if self.channel_data.len() < num_components {
             self.channel_data
@@ -193,22 +213,23 @@ impl DecoderContext {
     }
 }
 
-fn is_full_image_tile(tile: &Tile, component_info: &ComponentInfo, header: &Header) -> bool {
+fn is_full_image_tile(tile: &Tile, component_info: &ComponentInfo, params: DecodeParams) -> bool {
     let component_tile = ComponentTile::new(tile, component_info);
     let resolution_tile = ResolutionTile::new(
         component_tile,
-        component_info.num_resolution_levels() - 1 - header.skipped_resolution_levels,
+        component_info.num_resolution_levels() - 1 - params.skipped_resolution_levels,
     );
     resolution_tile.rect.x0 == 0
         && resolution_tile.rect.y0 == 0
-        && resolution_tile.rect.width() == header.size_data.image_width()
-        && resolution_tile.rect.height() == header.size_data.image_height()
+        && resolution_tile.rect.width() == params.width
+        && resolution_tile.rect.height() == params.height
 }
 
 fn decode_tile(
     codestream: &[u8],
     tile: &Tile,
     header: &Header,
+    params: DecodeParams,
     progression_iterator: ProgressionIterator<'_>,
     tile_ctx: &mut TileDecodeContext,
     channel_data: &mut [ComponentData],
@@ -223,7 +244,7 @@ fn decode_tile(
         tile,
         header,
         storage,
-        header.skipped_resolution_levels,
+        params.skipped_resolution_levels,
         cancel,
     )?;
     segment::parse(
@@ -231,6 +252,7 @@ fn decode_tile(
         tile,
         progression_iterator,
         header,
+        params.skipped_resolution_levels,
         storage,
         received_packets,
         decoded_resolutions,
@@ -248,16 +270,16 @@ fn decode_tile(
         let component_tile = ComponentTile::new(tile, component_info);
         let resolution_tile = ResolutionTile::new(
             component_tile,
-            component_info.num_resolution_levels() - 1 - header.skipped_resolution_levels,
+            component_info.num_resolution_levels() - 1 - params.skipped_resolution_levels,
         );
         let full_image_tile = resolution_tile.rect.x0 == 0
             && resolution_tile.rect.y0 == 0
-            && resolution_tile.rect.width() == header.size_data.image_width()
-            && resolution_tile.rect.height() == header.size_data.image_height();
+            && resolution_tile.rect.width() == params.width
+            && resolution_tile.rect.height() == params.height;
 
         let output_plane = OutputPlane {
             data: &mut channel.container,
-            stride: header.size_data.image_width() as usize,
+            stride: params.width as usize,
             x0: resolution_tile.rect.x0 as usize,
             y0: resolution_tile.rect.y0 as usize,
         };
@@ -273,6 +295,7 @@ fn decode_tile(
             idx,
             component_info,
             header,
+            params,
             cancel,
         )?;
         if full_image_tile {
@@ -388,6 +411,7 @@ pub(crate) fn decode_sub_band_strip(
     bit_plane_buffers: &mut BitPlaneDecodeBuffers,
     storage: &DecompositionStorage,
     header: &Header,
+    max_layers: Option<u8>,
     abs_y0: u32,
     abs_y1: u32,
     dst: &mut Vec<f32>,
@@ -414,6 +438,7 @@ pub(crate) fn decode_sub_band_strip(
         bit_plane_buffers,
         storage,
         header,
+        max_layers,
         abs_y0,
         abs_y1,
         dst,
@@ -432,6 +457,7 @@ pub(crate) fn decode_sub_band_strip_into(
     bit_plane_buffers: &mut BitPlaneDecodeBuffers,
     storage: &DecompositionStorage,
     header: &Header,
+    max_layers: Option<u8>,
     abs_y0: u32,
     abs_y1: u32,
     dst: &mut [f32],
@@ -536,7 +562,7 @@ pub(crate) fn decode_sub_band_strip_into(
                 bit_plane_ctx,
                 bit_plane_buffers,
                 storage,
-                header.max_layers,
+                max_layers,
                 header.strict,
             )? {
                 let cb_w = code_block.rect.width() as usize;

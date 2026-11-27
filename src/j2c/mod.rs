@@ -18,9 +18,8 @@ use crate::reader::BitReader;
 use crate::{DecodeSettings, Image};
 
 use crate::math::{SIMD_WIDTH, SimdBuffer};
-pub(crate) use codestream::Header;
-pub use decode::DecoderContext;
-pub(crate) use decode::decode;
+pub(crate) use codestream::{Header, MAX_RESOLUTIONS};
+pub(crate) use decode::{DecodeParams, DecoderContext, decode};
 pub use inspect::Inspection;
 pub(crate) use inspect::inspect;
 
@@ -40,7 +39,7 @@ pub(crate) fn parse<'a>(stream: &'a [u8], settings: &DecodeSettings) -> Result<I
     Ok(Image {
         codestream: parsed_codestream.data,
         header: parsed_codestream.header,
-        settings: settings.clone(),
+        settings: *settings,
     })
 }
 

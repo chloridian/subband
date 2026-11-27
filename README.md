@@ -3,33 +3,28 @@ Subband is a pure-Rust JPEG 2000 decoder for Second Life textures, forked from [
 ## Example
 
 ```rust
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use subband::{CancelHandle, DecodeSettings, DecoderContext, Image};
+use subband::{Decode, DecodeSettings, Image};
 
 fn main() -> Result<(), subband::DecodeError> {
     let data = include_bytes!("benches/fixtures/plywood.j2c");
     let prefix = &data[..4096];
 
-    let info = subband::inspect(prefix, &DecodeSettings::default())?;
+    let settings = DecodeSettings::default();
+    let info = subband::inspect(prefix, &settings, None)?;
     let discard = info.complete_discard().unwrap_or(info.levels());
 
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&cancelled);
-    let settings = DecodeSettings {
-        discard,
-        cancel: Some(CancelHandle::new(move || flag.load(Ordering::Relaxed))),
-        ..DecodeSettings::default()
-    };
-
+    let cancelled = AtomicBool::new(false);
     let image = Image::from_codestream(prefix, &settings)?;
-    let mut ctx = DecoderContext::default();
-    let decoded = image.decode(&mut ctx)?;
-
-    let mut pixels = vec![0; decoded.buffer_len()];
-    decoded.write_to(&mut pixels)?;
-    let (_width, _height, _components) = (decoded.width(), decoded.height(), decoded.components());
+    let request = Decode {
+        discard,
+        max_layers: None,
+    };
+    let [_width, _height] = image.output_size(&request);
+    let mut pixels = vec![0; image.output_len(&request)];
+    let decoded = image.decode_into(&request, &mut pixels, || cancelled.load(Ordering::Relaxed))?;
+    let _layers = decoded.layers_received();
 
     Ok(())
 }

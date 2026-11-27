@@ -3,7 +3,9 @@ use std::vec::Vec;
 use super::bitplane::{BitPlaneDecodeBuffers, BitPlaneDecodeContext};
 use super::build::Decomposition;
 use super::codestream::{ComponentInfo, WaveletTransform};
-use super::decode::{DecompositionStorage, decode_sub_band_strip, decode_sub_band_strip_into};
+use super::decode::{
+    DecodeParams, DecompositionStorage, decode_sub_band_strip, decode_sub_band_strip_into,
+};
 use super::rect::IntRect;
 use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result};
@@ -66,6 +68,7 @@ pub(crate) fn apply(
     component_idx: usize,
     component_info: &ComponentInfo,
     header: &Header,
+    params: DecodeParams,
     cancel: Cancel<'_>,
 ) -> Result<()> {
     let tile_decompositions = storage
@@ -80,7 +83,7 @@ pub(crate) fn apply(
     let keep = usize::from(
         component_info
             .num_resolution_levels()
-            .saturating_sub(header.skipped_resolution_levels)
+            .saturating_sub(params.skipped_resolution_levels)
             .saturating_sub(1),
     );
     let decompositions = decompositions.get(..keep).ok_or(DecodeError::Malformed)?;
@@ -103,6 +106,7 @@ pub(crate) fn apply(
             bit_plane_buffers,
             storage,
             header,
+            params.max_layers,
             ll_sub_band.rect.y0,
             ll_sub_band.rect.y1,
             dst,
@@ -180,6 +184,7 @@ pub(crate) fn apply(
         bit_plane_buffers,
         storage,
         header,
+        params.max_layers,
         ll_sub_band.rect.y0,
         ll_sub_band.rect.y1,
         &mut scratch.strip_b,
@@ -206,6 +211,7 @@ pub(crate) fn apply(
             component_info,
             storage,
             header,
+            params.max_layers,
             cancel,
         );
     };
@@ -234,6 +240,7 @@ pub(crate) fn apply(
             component_info,
             storage,
             header,
+            params.max_layers,
             cancel,
         )?;
     } else if use_output_as_scratch {
@@ -254,6 +261,7 @@ pub(crate) fn apply(
             component_info,
             storage,
             header,
+            params.max_layers,
             cancel,
         )?;
     } else {
@@ -278,6 +286,7 @@ pub(crate) fn apply(
             component_info,
             storage,
             header,
+            params.max_layers,
             cancel,
         )?;
     }
@@ -315,6 +324,7 @@ pub(crate) fn apply(
                 component_info,
                 storage,
                 header,
+                params.max_layers,
                 cancel,
             )?;
         } else if use_output_as_scratch {
@@ -335,6 +345,7 @@ pub(crate) fn apply(
                 component_info,
                 storage,
                 header,
+                params.max_layers,
                 cancel,
             )?;
         } else {
@@ -359,6 +370,7 @@ pub(crate) fn apply(
                 component_info,
                 storage,
                 header,
+                params.max_layers,
                 cancel,
             )?;
         }
@@ -386,6 +398,7 @@ pub(crate) fn apply(
         component_info,
         storage,
         header,
+        params.max_layers,
         cancel,
     )
 }
@@ -405,6 +418,7 @@ fn filter_2d_first(
     component_info: &ComponentInfo,
     storage: &DecompositionStorage,
     header: &Header,
+    max_layers: Option<u8>,
     cancel: Cancel<'_>,
 ) -> Result<()> {
     let width = decomposition.rect.width() as usize;
@@ -437,6 +451,7 @@ fn filter_2d_first(
             bit_plane_buffers,
             storage,
             header,
+            max_layers,
             strip_a,
             low_row,
             high_row,
@@ -461,6 +476,7 @@ fn filter_2d_first(
             bit_plane_buffers,
             storage,
             header,
+            max_layers,
             strip_a,
             strip_b,
             low_row,
@@ -502,6 +518,7 @@ fn filter_2d(
     component_info: &ComponentInfo,
     storage: &DecompositionStorage,
     header: &Header,
+    max_layers: Option<u8>,
     cancel: Cancel<'_>,
 ) -> Result<()> {
     let width = decomposition.rect.width() as usize;
@@ -534,6 +551,7 @@ fn filter_2d(
             bit_plane_buffers,
             storage,
             header,
+            max_layers,
             strip_a,
             low_row,
             high_row,
@@ -558,6 +576,7 @@ fn filter_2d(
             bit_plane_buffers,
             storage,
             header,
+            max_layers,
             strip_a,
             strip_b,
             low_row,
@@ -595,6 +614,7 @@ fn filter_low_rows_streaming<S: Simd>(
     bit_plane_buffers: &mut BitPlaneDecodeBuffers,
     storage: &DecompositionStorage,
     header: &Header,
+    max_layers: Option<u8>,
     hl_strip: &mut Vec<f32>,
     low_row: &mut Vec<f32>,
     high_row: &mut Vec<f32>,
@@ -634,6 +654,7 @@ fn filter_low_rows_streaming<S: Simd>(
             bit_plane_buffers,
             storage,
             header,
+            max_layers,
             abs_y,
             abs_y_end,
             hl_strip,
@@ -677,6 +698,7 @@ fn filter_high_rows_streaming<S: Simd>(
     bit_plane_buffers: &mut BitPlaneDecodeBuffers,
     storage: &DecompositionStorage,
     header: &Header,
+    max_layers: Option<u8>,
     lh_strip: &mut Vec<f32>,
     hh_strip: &mut Vec<f32>,
     low_row: &mut Vec<f32>,
@@ -717,6 +739,7 @@ fn filter_high_rows_streaming<S: Simd>(
             bit_plane_buffers,
             storage,
             header,
+            max_layers,
             abs_y,
             abs_y_end,
             lh_strip,
@@ -731,6 +754,7 @@ fn filter_high_rows_streaming<S: Simd>(
             bit_plane_buffers,
             storage,
             header,
+            max_layers,
             abs_y,
             abs_y_end,
             hh_strip,

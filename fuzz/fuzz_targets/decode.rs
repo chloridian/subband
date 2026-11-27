@@ -1,15 +1,14 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use subband::{DecodeSettings, DecoderContext, Image};
+use subband::{Decode, DecodeSettings, Image};
 
 fn run(data: &[u8], strict: bool) {
     let settings = DecodeSettings {
         strict,
-        discard: 1,
         ..DecodeSettings::default()
     };
-    if let Ok(info) = subband::inspect(data, &settings) {
+    if let Ok(info) = subband::inspect(data, &settings, None) {
         for d in 0..=info.levels().saturating_add(1) {
             let _ = info.bytes_for(d, None);
             let _ = info.bytes_for(d, Some(1));
@@ -21,11 +20,13 @@ fn run(data: &[u8], strict: bool) {
     if image.width() > 4096 || image.height() > 4096 {
         return;
     }
-    let mut ctx = DecoderContext::default();
-    if let Ok(decoded) = image.decode(&mut ctx) {
+    let request = Decode {
+        discard: 1,
+        max_layers: None,
+    };
+    let mut buf = vec![0; image.output_len(&request)];
+    if let Ok(decoded) = image.decode_into(&request, &mut buf, || false) {
         let _ = decoded.layers_received();
-        let mut buf = vec![0; decoded.buffer_len()];
-        let _ = decoded.write_to(&mut buf);
     }
 }
 

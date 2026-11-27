@@ -8,15 +8,10 @@ mod jp2;
 pub(crate) mod math;
 pub(crate) mod reader;
 
-use std::vec;
-use std::vec::Vec;
-
 use crate::cancel::{CHUNK, Cancel};
-pub use crate::cancel::{CancelCheck, CancelHandle};
 pub use crate::error::{DecodeError, Result};
-use crate::j2c::Header;
-pub use crate::j2c::{DecoderContext, Inspection};
-pub use crate::jp2::DecodedImage;
+pub use crate::j2c::Inspection;
+use crate::j2c::{ComponentData, DecodeParams, DecoderContext, Header, MAX_RESOLUTIONS};
 use crate::math::{Level, Simd, dispatch};
 
 pub(crate) const JP2_MAGIC: &[u8] = b"\x00\x00\x00\x0C\x6A\x50\x20\x20";
@@ -26,12 +21,9 @@ const DEFAULT_MAX_EDGE: u32 = 4096;
 const DEFAULT_MAX_INPUT: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_OUTPUT: usize = 64 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct DecodeSettings {
     pub strict: bool,
-    pub discard: u8,
-    pub max_layers: Option<u8>,
-    pub cancel: Option<CancelHandle>,
     pub max_edge: u32,
     pub max_input: usize,
     pub max_output: usize,
@@ -41,13 +33,61 @@ impl Default for DecodeSettings {
     fn default() -> Self {
         Self {
             strict: false,
-            discard: 0,
-            max_layers: None,
-            cancel: None,
             max_edge: DEFAULT_MAX_EDGE,
             max_input: DEFAULT_MAX_INPUT,
             max_output: DEFAULT_MAX_OUTPUT,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Decode {
+    pub discard: u8,
+    pub max_layers: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Decoded {
+    width: u32,
+    height: u32,
+    components: u8,
+    layers_received: [u8; MAX_RESOLUTIONS],
+    resolutions: u8,
+}
+
+impl Decoded {
+    pub(crate) fn new(
+        width: u32,
+        height: u32,
+        components: u8,
+        layers_received: [u8; MAX_RESOLUTIONS],
+        resolutions: u8,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            components,
+            layers_received,
+            resolutions,
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn components(&self) -> u8 {
+        self.components
+    }
+
+    pub fn layers_received(&self) -> &[u8] {
+        self.layers_received
+            .get(..usize::from(self.resolutions))
+            .unwrap_or(&self.layers_received)
     }
 }
 
@@ -64,7 +104,7 @@ impl<'a> Image<'a> {
         }
 
         if data.starts_with(JP2_MAGIC) {
-            jp2::parse(data, settings.clone())
+            jp2::parse(data, *settings)
         } else if data.starts_with(CODESTREAM_MAGIC) {
             j2c::parse(data, settings)
         } else {
@@ -85,11 +125,11 @@ impl<'a> Image<'a> {
     }
 
     pub fn width(&self) -> u32 {
-        self.header.size_data.image_width()
+        self.header.size_data.reference_grid_width
     }
 
     pub fn height(&self) -> u32 {
-        self.header.size_data.image_height()
+        self.header.size_data.reference_grid_height
     }
 
     pub fn components(&self) -> u8 {
@@ -104,79 +144,82 @@ impl<'a> Image<'a> {
         self.header.global_coding_style.num_layers
     }
 
-    pub fn decode<'b>(&self, decoder_context: &'b mut DecoderContext) -> Result<DecodedImage<'b>> {
-        let settings = &self.settings;
-        let cancel = Cancel(settings.cancel.as_ref());
-        j2c::decode(self.codestream, &self.header, decoder_context, cancel)?;
-        let num_components = self.header.component_infos.len();
-        let decoded_components = decoder_context
-            .channel_data
-            .get(..num_components)
-            .ok_or(DecodeError::Malformed)?;
-        Ok(DecodedImage {
-            decoded_components,
-            layers_received: &decoder_context.layers_received,
-            width: self.width(),
-            height: self.height(),
-            cancel: settings.cancel.clone(),
-        })
-    }
-}
-
-impl DecodedImage<'_> {
-    pub fn width(&self) -> u32 {
-        self.width
+    pub fn output_size(&self, request: &Decode) -> [u32; 2] {
+        let discard = request.discard.min(self.header.levels);
+        let factor = 1_u32 << discard;
+        [
+            self.header.size_data.reference_grid_width.div_ceil(factor),
+            self.header.size_data.reference_grid_height.div_ceil(factor),
+        ]
     }
 
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    pub fn components(&self) -> u8 {
-        self.decoded_components.len() as u8
-    }
-
-    pub fn layers_received(&self) -> &[u8] {
-        self.layers_received
-    }
-
-    pub fn buffer_len(&self) -> usize {
-        (self.width as usize)
-            .saturating_mul(self.height as usize)
+    pub fn output_len(&self, request: &Decode) -> usize {
+        let [width, height] = self.output_size(request);
+        (width as usize)
+            .saturating_mul(height as usize)
             .saturating_mul(usize::from(self.components()))
     }
 
-    pub fn data_u8(&self) -> Result<Vec<u8>> {
-        let mut buf = vec![0; self.buffer_len()];
-        self.write_to(&mut buf)?;
-
-        Ok(buf)
-    }
-
-    pub fn write_to(&self, buf: &mut [u8]) -> Result<()> {
-        if buf.len() != self.buffer_len() {
+    pub fn decode_into(
+        &self,
+        request: &Decode,
+        out: &mut [u8],
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Decoded> {
+        let discard = request.discard.min(self.header.levels);
+        let [width, height] = self.output_size(request);
+        let output_bytes = u64::from(width)
+            .saturating_mul(u64::from(height))
+            .saturating_mul(u64::from(self.header.size_data.num_components));
+        if output_bytes > self.settings.max_output as u64 {
+            return Err(DecodeError::TooLarge);
+        }
+        let expected_len = usize::try_from(output_bytes).map_err(|_| DecodeError::TooLarge)?;
+        if out.len() != expected_len {
             return Err(DecodeError::BufferSize);
         }
 
-        interleave_and_convert(self, buf)
+        let params = DecodeParams {
+            skipped_resolution_levels: discard,
+            max_layers: request.max_layers.map(|n| n.max(1)),
+            width,
+            height,
+        };
+        let cancel = Cancel(&cancelled);
+        let mut ctx = DecoderContext::default();
+        let decoded = j2c::decode(self.codestream, &self.header, params, &mut ctx, cancel)?;
+        let num_components = self.header.component_infos.len();
+        let decoded_components = ctx
+            .channel_data
+            .get(..num_components)
+            .ok_or(DecodeError::Malformed)?;
+        interleave_and_convert(decoded_components, out, cancel)?;
+
+        Ok(decoded)
     }
 }
 
-pub fn inspect(data: &[u8], settings: &DecodeSettings) -> Result<Inspection> {
+pub fn inspect(
+    data: &[u8],
+    settings: &DecodeSettings,
+    max_layers: Option<u8>,
+) -> Result<Inspection> {
     if data.len() > settings.max_input {
         return Err(DecodeError::TooLarge);
     }
 
     if data.starts_with(CODESTREAM_MAGIC) {
-        j2c::inspect(data, settings)
+        j2c::inspect(data, settings, max_layers)
     } else {
         Err(DecodeError::Malformed)
     }
 }
 
-fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) -> Result<()> {
-    let cancel = Cancel(image.cancel.as_ref());
-    let components = image.decoded_components;
+fn interleave_and_convert(
+    components: &[ComponentData],
+    buf: &mut [u8],
+    cancel: Cancel<'_>,
+) -> Result<()> {
     let Some(first) = components.first() else {
         return Ok(());
     };
