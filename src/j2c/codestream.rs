@@ -7,7 +7,8 @@ use crate::error::{DecodeError, Result, bail};
 use crate::reader::BitReader;
 
 const MAX_TILES: u32 = 256;
-const MAX_DECOMPOSITION_LEVELS: u8 = 12;
+pub(crate) const MAX_DECOMPOSITION_LEVELS: u8 = 12;
+pub(crate) const MAX_RESOLUTIONS: usize = MAX_DECOMPOSITION_LEVELS as usize + 1;
 const MAX_LAYER_COUNT: u8 = 32;
 const MAX_PRECINCT_EXPONENT: u8 = 31;
 const MAX_CODE_BLOCKS: u64 = 65_536;
@@ -42,8 +43,6 @@ pub(crate) struct Header {
     pub(crate) ppm_packets: Vec<PpmPacket>,
     pub(crate) progression_changes: Vec<ProgressionChange>,
     pub(crate) levels: u8,
-    pub(crate) skipped_resolution_levels: u8,
-    pub(crate) max_layers: Option<u8>,
     pub(crate) strict: bool,
     pub(crate) marker_budget: MarkerBudget,
 }
@@ -68,7 +67,7 @@ pub(crate) fn read_header<'a>(
     }
 
     let siz_start = reader.offset();
-    let mut size_data = size_marker(reader, settings)?;
+    let size_data = size_marker(reader, settings)?;
     marker_budget.record(reader.offset() - siz_start)?;
     if size_data.num_tiles()? > MAX_TILES {
         bail!(DecodeError::TooLarge);
@@ -170,17 +169,6 @@ pub(crate) fn read_header<'a>(
         .map(|c| c.num_decomposition_levels())
         .min()
         .ok_or(DecodeError::Malformed)?;
-    let skipped_resolution_levels = settings.discard.min(levels);
-    let max_layers = settings.max_layers.map(|n| n.max(1));
-
-    size_data.resolution_shrink_factor *= 1 << skipped_resolution_levels;
-
-    let output_bytes = u64::from(size_data.image_width())
-        .saturating_mul(u64::from(size_data.image_height()))
-        .saturating_mul(u64::from(size_data.num_components));
-    if output_bytes > settings.max_output as u64 {
-        bail!(DecodeError::TooLarge);
-    }
 
     let ppm_packets = ppm_packets(ppm_markers).ok_or(DecodeError::Malformed)?;
 
@@ -191,8 +179,6 @@ pub(crate) fn read_header<'a>(
         ppm_packets,
         progression_changes,
         levels,
-        skipped_resolution_levels,
-        max_layers,
         strict: settings.strict,
         marker_budget,
     };
@@ -509,7 +495,6 @@ pub(crate) struct SizeData {
     pub(crate) tile_width: u32,
     pub(crate) tile_height: u32,
     pub(crate) num_components: u16,
-    pub(crate) resolution_shrink_factor: u32,
 }
 
 impl SizeData {
@@ -536,16 +521,6 @@ impl SizeData {
             .ok_or(DecodeError::TooLarge)?;
 
         Ok(tile_count)
-    }
-
-    pub(crate) fn image_width(&self) -> u32 {
-        self.reference_grid_width
-            .div_ceil(self.resolution_shrink_factor)
-    }
-
-    pub(crate) fn image_height(&self) -> u32 {
-        self.reference_grid_height
-            .div_ceil(self.resolution_shrink_factor)
     }
 }
 
@@ -599,7 +574,6 @@ fn size_marker(reader: &mut BitReader<'_>, settings: &DecodeSettings) -> Result<
         tile_width: xt_siz,
         tile_height: yt_siz,
         num_components: csiz,
-        resolution_shrink_factor: 1,
     })
 }
 

@@ -859,11 +859,8 @@ mod tests {
             tile_width: 396,
             tile_height: 297,
             num_components: 1,
-            resolution_shrink_factor: 1,
         };
 
-        assert_eq!(size_data.image_width(), 1280);
-        assert_eq!(size_data.image_height(), 720);
         assert_eq!(size_data.num_x_tiles(), 4);
         assert_eq!(size_data.num_y_tiles(), 3);
         assert_eq!(size_data.num_tiles(), Ok(12));
@@ -880,8 +877,6 @@ mod tests {
             ppm_packets: vec![],
             progression_changes: vec![],
             levels: 0,
-            skipped_resolution_levels: 0,
-            max_layers: None,
             strict: false,
             marker_budget: MarkerBudget::default(),
         };

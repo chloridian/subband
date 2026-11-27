@@ -6,7 +6,7 @@ use super::codestream::{ComponentInfo, Header};
 use super::decode::{DecompositionStorage, SubBandIter};
 use super::progression::{ProgressionData, ProgressionIterator};
 use super::tile::{Tile, TilePart};
-use crate::cancel::Cancel;
+use crate::check_cancelled;
 use crate::error::{DecodeError, Result, bail};
 use crate::reader::{BitReadError, BitReader};
 
@@ -33,15 +33,16 @@ pub(crate) fn parse(
     tile: &Tile,
     mut progression_iterator: ProgressionIterator<'_>,
     header: &Header,
+    skipped_resolution_levels: u8,
     storage: &mut DecompositionStorage,
     received_packets: &mut [u64],
     decoded_resolutions: usize,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let num_layers = usize::from(tile.num_layers);
     let component_infos = tile.component_infos(header);
     let stop_at_discard = can_stop_at_discard(tile, header);
-    let max_res = max_decoded_resolutions(tile, header)?;
+    let max_res = max_decoded_resolutions(tile, header, skipped_resolution_levels)?;
 
     for tile_part_data in &tile.tile_parts {
         let tile_part = tile_part_data
@@ -55,10 +56,10 @@ pub(crate) fn parse(
             received_packets,
             decoded_resolutions,
             num_layers,
-            header.skipped_resolution_levels,
+            skipped_resolution_levels,
             stop_at_discard,
             max_res,
-            cancel,
+            cancelled,
         )? {
             Ok(()) | Err(PacketError::Truncated) => {}
             Err(PacketError::Done) => break,
@@ -81,10 +82,10 @@ fn parse_inner(
     skipped_resolution_levels: u8,
     stop_at_discard: bool,
     max_res: u8,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<result::Result<(), PacketError>> {
     while !tile_part.header().at_end() {
-        cancel.check()?;
+        check_cancelled(cancelled)?;
 
         match parse_packet(
             &mut tile_part,

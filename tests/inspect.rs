@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use subband::{DecodeError, DecodeSettings, DecoderContext, Image};
+use subband::{Decode, DecodeError, DecodeSettings, Image};
 
 use crate::*;
 
@@ -16,20 +16,20 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 fn decode_bytes(data: &[u8], discard: u8, max_layers: Option<u8>) -> Vec<u8> {
-    let settings = DecodeSettings {
+    let image = Image::from_codestream(data, &DecodeSettings::default()).unwrap();
+    let request = Decode {
         discard,
         max_layers,
-        ..DecodeSettings::default()
     };
-    let image = Image::from_codestream(data, &settings).unwrap();
-    let mut ctx = DecoderContext::default();
-    image.decode(&mut ctx).unwrap().data_u8().unwrap()
+    let mut buf = vec![0; image.output_len(&request)];
+    image.decode_into(&request, &mut buf, || false).unwrap();
+    buf
 }
 
 fn verify_fixture_prefixes(name: &str, expect_plt_ahead: bool) {
     let data = fixture(name);
     let settings = DecodeSettings::default();
-    let full = subband::inspect(&data, &settings).unwrap();
+    let full = subband::inspect(&data, &settings, None).unwrap();
     let levels = full.levels();
     let layers = full.layers();
 
@@ -65,7 +65,7 @@ fn verify_fixture_prefixes(name: &str, expect_plt_ahead: bool) {
 
     if expect_plt_ahead {
         let first_boundary = *boundaries.first().unwrap();
-        let early = subband::inspect(&data[..first_boundary], &settings).unwrap();
+        let early = subband::inspect(&data[..first_boundary], &settings, None).unwrap();
         for d in 0..=levels {
             assert_eq!(
                 early.bytes_for(d, None),
@@ -77,7 +77,7 @@ fn verify_fixture_prefixes(name: &str, expect_plt_ahead: bool) {
 
     for &b in &boundaries {
         for len in [b.saturating_sub(1), b] {
-            let info = subband::inspect(&data[..len], &settings).unwrap();
+            let info = subband::inspect(&data[..len], &settings, None).unwrap();
             assert_eq!(info.width(), full.width());
             assert_eq!(info.height(), full.height());
             assert_eq!(info.components(), full.components());
@@ -153,7 +153,7 @@ fn multi_tile_and_progressions() {
         "tile_parts_interleaved",
     ] {
         let data = read_stream(name);
-        let full = subband::inspect(&data, &DecodeSettings::default()).unwrap();
+        let full = subband::inspect(&data, &DecodeSettings::default(), None).unwrap();
         assert_eq!(full.complete_discard(), Some(0), "{name}: complete_discard");
         for d in 0..=full.levels() {
             let req = full
@@ -172,7 +172,7 @@ fn truncated_headers_and_limits() {
     let settings = DecodeSettings::default();
 
     for cut in [0, 1, 2, 4, 20, 50] {
-        let res = subband::inspect(&data[..cut], &settings);
+        let res = subband::inspect(&data[..cut], &settings, None);
         assert_matches!(res, Err(DecodeError::Malformed));
     }
 
@@ -181,15 +181,15 @@ fn truncated_headers_and_limits() {
         .position(|w| w == [0xFF, 0x90])
         .expect("plywood has SOT");
     assert_matches!(
-        subband::inspect(&data[..sot_pos], &settings),
+        subband::inspect(&data[..sot_pos], &settings, None),
         Err(DecodeError::Malformed)
     );
 
-    let after_sot = subband::inspect(&data[..sot_pos + 2], &settings).unwrap();
+    let after_sot = subband::inspect(&data[..sot_pos + 2], &settings, None).unwrap();
     assert_eq!(after_sot.complete_discard(), None);
     assert_eq!(after_sot.bytes_for(after_sot.levels(), None), None);
 
-    let after_sot_header = subband::inspect(&data[..sot_pos + 12], &settings).unwrap();
+    let after_sot_header = subband::inspect(&data[..sot_pos + 12], &settings, None).unwrap();
     assert_eq!(after_sot_header.complete_discard(), None);
     assert_eq!(
         after_sot_header.bytes_for(after_sot_header.levels(), None),
@@ -201,7 +201,7 @@ fn truncated_headers_and_limits() {
         ..DecodeSettings::default()
     };
     assert_matches!(
-        subband::inspect(&data, &small_limit),
+        subband::inspect(&data, &small_limit, None),
         Err(DecodeError::TooLarge)
     );
 }

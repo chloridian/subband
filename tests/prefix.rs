@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use subband::{DecodeError, DecodeSettings, DecoderContext, Image};
+use subband::{Decode, DecodeError, DecodeSettings, Image};
 
 const EVEN_CUTS: usize = 64;
 
@@ -63,7 +63,7 @@ fn prefix_lengths(data: &[u8], header_end: usize) -> Vec<usize> {
         .map(|i| header_end + span * i / EVEN_CUTS)
         .collect();
 
-    let full = subband::inspect(data, &DecodeSettings::default()).expect("full inspect");
+    let full = subband::inspect(data, &DecodeSettings::default(), None).expect("full inspect");
     for d in 0..=full.levels() {
         if let Some(end) = full.bytes_for(d, None)
             && end >= header_end
@@ -90,13 +90,17 @@ fn verify_prefixes(name: &str, discard: u8, strict: bool) {
     let header_end = main_header_end(&data);
     let settings = DecodeSettings {
         strict,
-        discard,
         ..DecodeSettings::default()
+    };
+    let request = Decode {
+        discard,
+        max_layers: None,
     };
 
     let full_image = Image::from_codestream(&data, &settings).expect("full header parses");
-    let expected_width = full_image.width();
-    let expected_height = full_image.height();
+    let full_width = full_image.width();
+    let full_height = full_image.height();
+    let [expected_width, expected_height] = full_image.output_size(&request);
     let expected_resolutions =
         usize::from(full_image.levels() - discard.min(full_image.levels())) + 1;
     let full_layers = full_image.layers();
@@ -109,13 +113,27 @@ fn verify_prefixes(name: &str, discard: u8, strict: bool) {
         let image = Image::from_codestream(prefix, &settings).unwrap_or_else(|e| {
             panic!("{name} (len={len}, discard={discard}, strict={strict}): header failed: {e}")
         });
-        assert_eq!(image.width(), expected_width, "{name} len={len}: width");
-        assert_eq!(image.height(), expected_height, "{name} len={len}: height");
+        assert_eq!(image.width(), full_width, "{name} len={len}: width");
+        assert_eq!(image.height(), full_height, "{name} len={len}: height");
+        assert_eq!(
+            image.output_size(&request),
+            [expected_width, expected_height],
+            "{name} len={len}: output_size"
+        );
 
-        let mut ctx = DecoderContext::default();
-        let decoded = image.decode(&mut ctx).unwrap_or_else(|e| {
-            panic!("{name} (len={len}, discard={discard}, strict={strict}): decode failed: {e}")
-        });
+        let expected_bytes = expected_samples * usize::from(image.components());
+        assert_eq!(
+            image.output_len(&request),
+            expected_bytes,
+            "{name} len={len}: output_len"
+        );
+
+        let mut out = vec![0; expected_bytes];
+        let decoded = image
+            .decode_into(&request, &mut out, || false)
+            .unwrap_or_else(|e| {
+                panic!("{name} (len={len}, discard={discard}, strict={strict}): decode failed: {e}")
+            });
         assert_eq!(
             decoded.layers_received().len(),
             expected_resolutions,
@@ -136,18 +154,6 @@ fn verify_prefixes(name: &str, discard: u8, strict: bool) {
             decoded.height(),
             expected_height,
             "{name} len={len}: decoded height"
-        );
-        let expected_bytes = expected_samples * usize::from(decoded.components());
-        assert_eq!(
-            decoded.buffer_len(),
-            expected_bytes,
-            "{name} len={len}: buffer_len"
-        );
-        let out = decoded.data_u8().expect("not cancelled");
-        assert_eq!(
-            out.len(),
-            expected_bytes,
-            "{name} len={len}: output byte count"
         );
     }
 }
@@ -247,37 +253,45 @@ fn layers_received_full_and_short() {
     let data = fixture("rgba-1024-lrcp");
     let header_end = main_header_end(&data);
 
-    for discard in [0_u8, 2] {
-        let settings = DecodeSettings {
-            strict: true,
-            discard,
-            ..DecodeSettings::default()
-        };
-        let full_image = Image::from_codestream(&data, &settings).unwrap();
-        let expected_len = usize::from(full_image.levels() - discard) + 1;
-        let total_layers = full_image.layers();
-        assert!(total_layers > 1, "rgba-1024-lrcp should be multi-layer");
+    let settings = DecodeSettings {
+        strict: true,
+        ..DecodeSettings::default()
+    };
+    let full_image = Image::from_codestream(&data, &settings).unwrap();
+    let header_only = Image::from_codestream(&data[..header_end], &settings).unwrap();
+    let short_image = Image::from_codestream(&data[..2000], &settings).unwrap();
+    let total_layers = full_image.layers();
+    assert!(total_layers > 1, "rgba-1024-lrcp should be multi-layer");
 
-        let mut ctx = DecoderContext::default();
-        let full_decoded = full_image.decode(&mut ctx).unwrap();
+    for discard in [0_u8, 2] {
+        let request = Decode {
+            discard,
+            max_layers: None,
+        };
+        let expected_len = usize::from(full_image.levels() - discard) + 1;
+
+        let mut buf = vec![0; full_image.output_len(&request)];
+        let full_decoded = full_image
+            .decode_into(&request, &mut buf, || false)
+            .unwrap();
         assert_eq!(
             full_decoded.layers_received(),
             vec![total_layers; expected_len].as_slice(),
             "full file discard={discard} should receive all layers"
         );
 
-        let header_only = Image::from_codestream(&data[..header_end], &settings).unwrap();
-        let mut ctx = DecoderContext::default();
-        let header_decoded = header_only.decode(&mut ctx).unwrap();
+        let header_decoded = header_only
+            .decode_into(&request, &mut buf, || false)
+            .unwrap();
         assert_eq!(
             header_decoded.layers_received(),
             vec![0; expected_len].as_slice(),
             "header-only prefix discard={discard} should receive 0 layers"
         );
 
-        let short_image = Image::from_codestream(&data[..2000], &settings).unwrap();
-        let mut ctx = DecoderContext::default();
-        let short_decoded = short_image.decode(&mut ctx).unwrap();
+        let short_decoded = short_image
+            .decode_into(&request, &mut buf, || false)
+            .unwrap();
         assert_eq!(short_decoded.layers_received().len(), expected_len);
         assert!(
             short_decoded

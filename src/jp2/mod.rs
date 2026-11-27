@@ -1,6 +1,5 @@
-use crate::cancel::CancelHandle;
 use crate::error::{DecodeError, Result, bail};
-use crate::j2c::{self, ComponentData};
+use crate::j2c;
 use crate::jp2::r#box::{FILE_TYPE, JP2_SIGNATURE};
 use crate::reader::BitReader;
 use crate::{DecodeSettings, Image};
@@ -8,14 +7,6 @@ use crate::{DecodeSettings, Image};
 pub(crate) mod r#box;
 
 const MAX_BOXES_PER_LEVEL: usize = 64;
-
-pub struct DecodedImage<'a> {
-    pub(crate) decoded_components: &'a [ComponentData],
-    pub(crate) layers_received: &'a [u8],
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) cancel: Option<CancelHandle>,
-}
 
 pub(crate) fn parse<'a>(data: &'a [u8], settings: DecodeSettings) -> Result<Image<'a>> {
     let mut reader = BitReader::new(data);

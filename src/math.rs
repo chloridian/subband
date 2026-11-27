@@ -1,15 +1,11 @@
-use core::ops::{Deref, DerefMut};
-use std::vec::Vec;
-
-use crate::cancel::Cancel;
-use crate::error::Result;
-
 pub(crate) const SIMD_WIDTH: usize = 8;
 
 #[cfg(feature = "simd")]
 mod inner {
     use super::SIMD_WIDTH;
     use core::ops::{Add, AddAssign, DivAssign, Mul, MulAssign, Sub, SubAssign};
+    #[cfg(not(target_arch = "aarch64"))]
+    use fearless_simd::Bytes;
     use fearless_simd::{SimdBase, SimdFloat};
 
     pub(crate) use fearless_simd::{Level, Simd, dispatch};
@@ -150,25 +146,27 @@ mod inner {
     }
 
     #[inline(always)]
-    pub(crate) fn round_and_interleave<S: Simd, const N: usize>(
+    pub(crate) fn round_and_interleave_f32x8<S: Simd, const N: usize>(
         simd: S,
-        channels: [&[f32; 16]; N],
+        channels: [(f32x8<S>, f32x8<S>); N],
         out: &mut [u8],
     ) {
         match N {
-            1 => to_u8(simd, channels[0]).store_slice(out),
+            1 => pair_to_u8(simd, channels[0].0, channels[0].1).store_slice(out),
             2 => {
-                let (low, high) =
-                    simd.interleave_u8x16(to_u8(simd, channels[0]), to_u8(simd, channels[1]));
+                let (low, high) = simd.interleave_u8x16(
+                    pair_to_u8(simd, channels[0].0, channels[0].1),
+                    pair_to_u8(simd, channels[1].0, channels[1].1),
+                );
                 let (out_low, out_high) = out.split_at_mut(16);
                 low.store_slice(out_low);
                 high.store_slice(out_high);
             }
             3 => {
                 let (c0, c1, c2) = (
-                    to_u8(simd, channels[0]),
-                    to_u8(simd, channels[1]),
-                    to_u8(simd, channels[2]),
+                    pair_to_u8(simd, channels[0].0, channels[0].1),
+                    pair_to_u8(simd, channels[1].0, channels[1].1),
+                    pair_to_u8(simd, channels[2].0, channels[2].1),
                 );
                 for (out, [i0, i1, i2]) in out.as_chunks_mut::<16>().0.iter_mut().zip(THREE_WAY) {
                     let interleaved = c0.swizzle_dyn_precise(i0)
@@ -179,10 +177,10 @@ mod inner {
             }
             4 => {
                 let channels = [
-                    to_u8(simd, channels[0]),
-                    to_u8(simd, channels[1]),
-                    to_u8(simd, channels[2]),
-                    to_u8(simd, channels[3]),
+                    pair_to_u8(simd, channels[0].0, channels[0].1),
+                    pair_to_u8(simd, channels[1].0, channels[1].1),
+                    pair_to_u8(simd, channels[2].0, channels[2].1),
+                    pair_to_u8(simd, channels[3].0, channels[3].1),
                 ];
                 if let Ok(out) = out.try_into() {
                     simd.store_four_interleaved_u8x16(channels, out);
@@ -193,11 +191,10 @@ mod inner {
     }
 
     #[inline(always)]
-    fn to_u8<S: Simd>(simd: S, values: &[f32; 16]) -> fearless_simd::u8x16<S> {
+    fn pair_to_u8<S: Simd>(simd: S, lo: f32x8<S>, hi: f32x8<S>) -> fearless_simd::u8x16<S> {
         let half = fearless_simd::f32x8::splat(simd, 0.5);
-        let (lo, hi) = values.split_at(8);
-        let convert = |chunk: &[f32]| {
-            let v = fearless_simd::f32x8::from_slice(simd, chunk) + half;
+        let convert = |v: f32x8<S>| {
+            let v = v.inner + half;
 
             #[cfg(target_arch = "aarch64")]
             {
@@ -207,8 +204,6 @@ mod inner {
 
             #[cfg(not(target_arch = "aarch64"))]
             {
-                use fearless_simd::Bytes;
-
                 let zero = fearless_simd::f32x8::splat(simd, 0.0);
                 let max = fearless_simd::f32x8::splat(simd, 255.0);
                 let (a, b) = simd
@@ -472,14 +467,22 @@ mod inner {
     }
 
     #[inline(always)]
-    pub(crate) fn round_and_interleave<S: Simd, const N: usize>(
+    pub(crate) fn round_and_interleave_f32x8<S: Simd, const N: usize>(
         _simd: S,
-        channels: [&[f32; 16]; N],
+        channels: [(f32x8<S>, f32x8<S>); N],
         out: &mut [u8],
     ) {
-        for (i, pixel) in out.as_chunks_mut::<N>().0.iter_mut().enumerate() {
-            for (value, channel) in pixel.iter_mut().zip(channels) {
-                if let Some(&sample) = channel.get(i) {
+        let (out_lo, out_hi) = out.split_at_mut(SIMD_WIDTH * N);
+        for (i, pixel) in out_lo.as_chunks_mut::<N>().0.iter_mut().enumerate() {
+            for (value, (lo, _)) in pixel.iter_mut().zip(channels) {
+                if let Some(&sample) = lo.val.get(i) {
+                    *value = super::round_to_u8(sample);
+                }
+            }
+        }
+        for (i, pixel) in out_hi.as_chunks_mut::<N>().0.iter_mut().enumerate() {
+            for (value, (_, hi)) in pixel.iter_mut().zip(channels) {
+                if let Some(&sample) = hi.val.get(i) {
                     *value = super::round_to_u8(sample);
                 }
             }
@@ -537,64 +540,3 @@ pub(crate) fn pow2i(exp: i32) -> f32 {
 }
 
 pub(crate) use inner::*;
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct SimdBuffer<const N: usize> {
-    data: Vec<f32>,
-    original_len: usize,
-}
-
-impl<const N: usize> SimdBuffer<N> {
-    pub(crate) fn prepare(
-        &mut self,
-        original_len: usize,
-        zero: bool,
-        cancel: Cancel<'_>,
-    ) -> Result<()> {
-        let padded_len = Self::padded_len(original_len);
-        if zero {
-            cancel.zero_prefix(&mut self.data, padded_len)?;
-        } else {
-            cancel.ensure_len(&mut self.data, padded_len)?;
-        }
-        self.original_len = original_len;
-        Ok(())
-    }
-
-    pub(crate) fn truncated(&self) -> &[f32] {
-        self.data.get(..self.original_len).unwrap_or(&self.data)
-    }
-
-    pub(crate) fn restore_padding(&mut self) {
-        let padded_len = Self::padded_len(self.original_len);
-        if let Some(pad) = self.data.get_mut(self.original_len..padded_len) {
-            pad.fill(0.0);
-        } else {
-            self.data.resize(padded_len, 0.0);
-        }
-    }
-
-    fn padded_len(original_len: usize) -> usize {
-        let remainder = original_len % N;
-        let padding = N - remainder;
-        original_len + padding
-    }
-}
-
-impl<const N: usize> Deref for SimdBuffer<N> {
-    type Target = [f32];
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        let len = Self::padded_len(self.original_len).min(self.data.len());
-        self.data.split_at(len).0
-    }
-}
-
-impl<const N: usize> DerefMut for SimdBuffer<N> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        let len = Self::padded_len(self.original_len).min(self.data.len());
-        self.data.split_at_mut(len).0
-    }
-}

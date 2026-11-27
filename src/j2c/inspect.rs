@@ -16,7 +16,6 @@ use super::tile::{
     Tile, TilePart, ppt_marker, sot_marker,
 };
 use crate::DecodeSettings;
-use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result, bail};
 use crate::reader::BitReader;
 
@@ -129,10 +128,11 @@ struct InspectCodeBlock {
     non_empty_layer_count: u8,
 }
 
-pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspection> {
-    let cancel = Cancel(settings.cancel.as_ref());
-    cancel.check()?;
-
+pub(crate) fn inspect(
+    stream: &[u8],
+    settings: &DecodeSettings,
+    max_layers: Option<u8>,
+) -> Result<Inspection> {
     let mut reader = BitReader::new(stream);
     if reader.read_marker()? != markers::SOC {
         bail!(DecodeError::Malformed);
@@ -150,7 +150,6 @@ pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspec
     let mut tile_part_idx = 0_usize;
 
     while reader.peek_marker() == Some(markers::SOT) {
-        cancel.check()?;
         if !parse_tile_part(
             &mut reader,
             &main_header,
@@ -184,7 +183,6 @@ pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspec
     let mut buckets = vec![Bucket::default(); num_d * stride];
 
     for tile in &tiles {
-        cancel.check()?;
         count_expected(tile, &main_header, levels, stride, &mut buckets)?;
     }
 
@@ -192,7 +190,6 @@ pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspec
     let data_len = stream.len();
 
     for (tile, parts) in tiles.iter().zip(tile_parts.iter_mut()) {
-        cancel.check()?;
         if parts.is_empty() {
             continue;
         }
@@ -203,7 +200,6 @@ pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspec
 
         if use_plt {
             for tp in parts.iter_mut() {
-                cancel.check()?;
                 tp.plt_markers.sort_by_key(|m| m.sequence_idx);
                 let lengths = parse_plt_lengths(&tp.plt_markers)?;
                 let mut cursor = tp.sod_end;
@@ -228,9 +224,8 @@ pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspec
                 }
             }
         } else {
-            build_header_state(tile, &main_header, &mut state, cancel)?;
+            build_header_state(tile, &main_header, &mut state)?;
             for tp in parts.iter_mut() {
-                cancel.check()?;
                 parse_tile_part_packets(
                     tp,
                     &mut prog,
@@ -240,15 +235,14 @@ pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspec
                     levels,
                     stride,
                     &mut buckets,
-                    cancel,
                 )?;
             }
         }
     }
 
     let complete_layers = usize::from(
-        main_header
-            .max_layers
+        max_layers
+            .map(|n| n.max(1))
             .map_or(table_layers, |n| n.min(table_layers)),
     );
     let mut complete_discard = None;
@@ -607,12 +601,7 @@ fn record_packet(
     }
 }
 
-fn build_header_state(
-    tile: &Tile,
-    header: &Header,
-    state: &mut HeaderState,
-    cancel: Cancel<'_>,
-) -> Result<()> {
+fn build_header_state(tile: &Tile, header: &Header, state: &mut HeaderState) -> Result<()> {
     state.code_blocks.clear();
     state.precincts.clear();
     state.tag_tree_nodes.clear();
@@ -632,7 +621,6 @@ fn build_header_state(
             let p_start = state.precincts.len();
 
             for precinct_data in resolution_tile.precincts().ok_or(DecodeError::Malformed)? {
-                cancel.check()?;
                 let precinct_rect = precinct_data.rect;
                 let cb_width = resolution_tile.code_block_width();
                 let cb_height = resolution_tile.code_block_height();
@@ -658,7 +646,6 @@ fn build_header_state(
 
                 let cb_start = state.code_blocks.len();
                 for y_idx in 0..code_blocks_y {
-                    cancel.check()?;
                     for x_idx in 0..code_blocks_x {
                         state.code_blocks.push(InspectCodeBlock {
                             x_idx,
@@ -721,10 +708,8 @@ fn parse_tile_part_packets(
     levels: u8,
     stride: usize,
     buckets: &mut [Bucket],
-    cancel: Cancel<'_>,
 ) -> Result<()> {
     while !tp.part.header().at_end() {
-        cancel.check()?;
         let Some((prog_data, body_len)) =
             parse_packet_header(&mut tp.part, prog, component_infos, state)
         else {

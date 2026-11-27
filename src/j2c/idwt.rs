@@ -1,762 +1,584 @@
+use std::vec;
 use std::vec::Vec;
 
-use super::bitplane::{BitPlaneDecodeBuffers, BitPlaneDecodeContext};
 use super::build::Decomposition;
 use super::codestream::{ComponentInfo, WaveletTransform};
-use super::decode::{DecompositionStorage, decode_sub_band_strip, decode_sub_band_strip_into};
+use super::decode::{DecodeCtx, DecodeParams, DecompositionStorage, decode_sub_band_strip};
+use super::mct;
 use super::rect::IntRect;
-use crate::cancel::Cancel;
+use crate::check_cancelled;
 use crate::error::{DecodeError, Result};
-use crate::j2c::Header;
 use crate::math::{self, Level, SIMD_WIDTH, Simd, dispatch, f32x8};
 
-#[derive(Default)]
-pub(crate) struct IdwtScratch {
-    pub(crate) buffer: Vec<f32>,
-    pub(crate) aux_buffer: Vec<f32>,
-    pub(crate) low_row: Vec<f32>,
-    pub(crate) high_row: Vec<f32>,
-    pub(crate) strip_a: Vec<f32>,
-    pub(crate) strip_b: Vec<f32>,
+const NEG_ALPHA: f32 = 1.586_134_3;
+const NEG_BETA: f32 = 0.052_980_117;
+const NEG_GAMMA: f32 = -0.882_911_1;
+const NEG_DELTA: f32 = -0.443_506_87;
+const KAPPA: f32 = 1.230_174_1;
+const INV_KAPPA: f32 = 1.0 / KAPPA;
+const MAX_LIFT_STEPS: usize = 4;
+
+const FILTER_53R: FilterSpec = FilterSpec {
+    scale_low: 1.0,
+    scale_high: 1.0,
+    steps: &[
+        LiftStep {
+            low: true,
+            rule: LiftRule::FloorQuarterOffset,
+        },
+        LiftStep {
+            low: false,
+            rule: LiftRule::FloorHalf,
+        },
+    ],
+};
+
+const FILTER_97I: FilterSpec = FilterSpec {
+    scale_low: KAPPA,
+    scale_high: INV_KAPPA,
+    steps: &[
+        LiftStep {
+            low: true,
+            rule: LiftRule::MulAdd(NEG_DELTA),
+        },
+        LiftStep {
+            low: false,
+            rule: LiftRule::MulAdd(NEG_GAMMA),
+        },
+        LiftStep {
+            low: true,
+            rule: LiftRule::MulAdd(NEG_BETA),
+        },
+        LiftStep {
+            low: false,
+            rule: LiftRule::MulAdd(NEG_ALPHA),
+        },
+    ],
+};
+
+#[derive(Clone, Copy)]
+enum LiftRule {
+    MulAdd(f32),
+    FloorQuarterOffset,
+    FloorHalf,
 }
 
-pub(crate) struct OutputPlane<'a> {
-    pub(crate) data: &'a mut [f32],
-    pub(crate) stride: usize,
-    pub(crate) x0: usize,
-    pub(crate) y0: usize,
+#[derive(Clone, Copy)]
+struct LiftStep {
+    low: bool,
+    rule: LiftRule,
 }
 
-impl OutputPlane<'_> {
-    fn target_slice(&mut self, width: usize, height: usize) -> Result<&mut [f32]> {
-        if width == 0 || height == 0 {
-            return Ok(&mut []);
+#[derive(Clone, Copy)]
+struct FilterSpec {
+    scale_low: f32,
+    scale_high: f32,
+    steps: &'static [LiftStep],
+}
+
+impl FilterSpec {
+    fn for_transform(transform: WaveletTransform) -> &'static Self {
+        match transform {
+            WaveletTransform::Reversible53 => &FILTER_53R,
+            WaveletTransform::Irreversible97 => &FILTER_97I,
         }
-        if self
-            .x0
-            .checked_add(width)
-            .is_none_or(|end| end > self.stride)
-        {
+    }
+}
+
+struct BandSource {
+    sub_band_idx: usize,
+    resolution: u8,
+    y0: u32,
+    y1: u32,
+    cb_height: u32,
+    width: usize,
+    strip_y0: u32,
+    strip_y1: u32,
+    strip: Vec<f32>,
+    next_y: usize,
+}
+
+impl BandSource {
+    fn new(sub_band_idx: usize, resolution: u8, storage: &DecompositionStorage) -> Result<Self> {
+        let sb = storage
+            .sub_bands
+            .get(sub_band_idx)
+            .ok_or(DecodeError::Malformed)?;
+        Ok(Self {
+            sub_band_idx,
+            resolution,
+            y0: sb.rect.y0,
+            y1: sb.rect.y1,
+            cb_height: sb.cb_height,
+            width: sb.rect.width() as usize,
+            strip_y0: sb.rect.y0,
+            strip_y1: sb.rect.y0,
+            strip: Vec::new(),
+            next_y: 0,
+        })
+    }
+
+    #[inline(always)]
+    fn advance_to(&mut self, v: usize, ctx: &mut DecodeCtx<'_>) -> Result<()> {
+        if self.width == 0 {
+            return Ok(());
+        }
+        let abs_y = self
+            .y0
+            .checked_add(u32::try_from(v).map_err(|_| DecodeError::Malformed)?)
+            .ok_or(DecodeError::Malformed)?;
+        if abs_y >= self.y1 {
             return Err(DecodeError::Malformed);
         }
-        let start = self
+        if abs_y < self.strip_y0 || abs_y >= self.strip_y1 {
+            self.decode_strip(abs_y, ctx)?;
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn row(&self, v: usize) -> Result<&[f32]> {
+        if self.width == 0 {
+            return Ok(&[]);
+        }
+        let abs_y = self
             .y0
-            .checked_mul(self.stride)
-            .and_then(|y| y.checked_add(self.x0))
+            .checked_add(u32::try_from(v).map_err(|_| DecodeError::Malformed)?)
             .ok_or(DecodeError::Malformed)?;
-        let span = (height - 1)
-            .checked_mul(self.stride)
-            .and_then(|y| y.checked_add(width))
-            .ok_or(DecodeError::Malformed)?;
-        self.data
-            .get_mut(start..)
-            .and_then(|s| s.get_mut(..span))
+        let local_y = abs_y
+            .checked_sub(self.strip_y0)
+            .ok_or(DecodeError::Malformed)? as usize;
+        self.strip
+            .get(local_y * self.width..)
+            .and_then(|s| s.get(..self.width))
             .ok_or(DecodeError::Malformed)
     }
+
+    #[inline(always)]
+    fn next_row(&mut self, ctx: &mut DecodeCtx<'_>) -> Result<&[f32]> {
+        let v = self.next_y;
+        self.next_y += 1;
+        self.advance_to(v, ctx)?;
+        self.row(v)
+    }
+
+    #[cold]
+    fn decode_strip(&mut self, abs_y: u32, ctx: &mut DecodeCtx<'_>) -> Result<()> {
+        let next_grid = (abs_y / self.cb_height + 1).saturating_mul(self.cb_height);
+        let abs_y_end = next_grid.min(self.y1);
+        decode_sub_band_strip(
+            ctx,
+            self.sub_band_idx,
+            self.resolution,
+            abs_y..abs_y_end,
+            &mut self.strip,
+        )?;
+        self.strip_y0 = abs_y;
+        self.strip_y1 = abs_y_end;
+        Ok(())
+    }
 }
 
-pub(crate) fn apply(
-    codestream: &[u8],
-    storage: &DecompositionStorage,
-    scratch: &mut IdwtScratch,
-    bit_plane_ctx: &mut BitPlaneDecodeContext,
-    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-    mut output: OutputPlane<'_>,
-    use_output_as_scratch: bool,
-    component_idx: usize,
-    component_info: &ComponentInfo,
-    header: &Header,
-    cancel: Cancel<'_>,
-) -> Result<()> {
-    let tile_decompositions = storage
-        .tile_decompositions
-        .get(component_idx)
-        .ok_or(DecodeError::Malformed)?;
+struct RowRing {
+    data: Vec<f32>,
+    width: usize,
+    rows: usize,
+}
 
-    let decompositions = storage
-        .decompositions
-        .get(tile_decompositions.decompositions.clone())
-        .ok_or(DecodeError::Malformed)?;
-    let keep = usize::from(
-        component_info
-            .num_resolution_levels()
-            .saturating_sub(header.skipped_resolution_levels)
-            .saturating_sub(1),
-    );
-    let decompositions = decompositions.get(..keep).ok_or(DecodeError::Malformed)?;
-    let ll_sub_band = storage
-        .sub_bands
-        .get(tile_decompositions.first_ll_sub_band)
-        .ok_or(DecodeError::Malformed)?;
-
-    let Some((last, intermediate)) = decompositions.split_last() else {
-        let width = ll_sub_band.rect.width() as usize;
-        let height = ll_sub_band.rect.height() as usize;
-        let dst_stride = output.stride;
-        let dst = output.target_slice(width, height)?;
-        return decode_sub_band_strip_into(
-            codestream,
-            tile_decompositions.first_ll_sub_band,
-            0,
-            component_info,
-            bit_plane_ctx,
-            bit_plane_buffers,
-            storage,
-            header,
-            ll_sub_band.rect.y0,
-            ll_sub_band.rect.y1,
-            dst,
-            0,
-            dst_stride,
-            cancel,
-        );
-    };
-
-    let buffer_size = |decomposition: &Decomposition| {
-        decomposition.rect.width() as usize * decomposition.rect.height() as usize
-    };
-
-    if let Some(prev) = intermediate.last() {
-        let prev_size = buffer_size(prev);
-        if scratch.buffer.capacity() < prev_size {
-            scratch.buffer.clear();
-            scratch.buffer.reserve_exact(prev_size);
-        }
+impl RowRing {
+    fn new(width: usize, rows: usize) -> Result<Self> {
+        let len = width.checked_mul(rows).ok_or(DecodeError::TooLarge)?;
+        Ok(Self {
+            data: vec![0.0; len],
+            width,
+            rows,
+        })
     }
 
-    if !use_output_as_scratch
-        && let Some(prev_prev) = intermediate
-            .len()
-            .checked_sub(2)
-            .and_then(|i| intermediate.get(i))
-    {
-        let prev_prev_size = buffer_size(prev_prev);
-        if scratch.aux_buffer.capacity() < prev_prev_size {
-            scratch.aux_buffer.clear();
-            scratch.aux_buffer.reserve_exact(prev_prev_size);
-        }
+    #[inline(always)]
+    fn slot(&self, row: usize) -> usize {
+        row % self.rows
     }
 
-    let max_half_width = (last.rect.width() as usize).div_ceil(2) + 2;
-    if scratch.low_row.capacity() < max_half_width {
-        scratch.low_row.clear();
-        scratch.low_row.reserve_exact(max_half_width);
-    }
-    if scratch.high_row.capacity() < max_half_width {
-        scratch.high_row.clear();
-        scratch.high_row.reserve_exact(max_half_width);
-    }
-
-    let mut max_strip_a = 0_usize;
-    let mut max_strip_b =
-        usize::try_from(ll_sub_band.rect.area()).map_err(|_| DecodeError::TooLarge)?;
-    for decomposition in decompositions {
-        let [hl_idx, lh_idx, hh_idx] = decomposition.sub_bands;
-        let strip_len = |idx: usize| -> Result<usize> {
-            let sb = storage.sub_bands.get(idx).ok_or(DecodeError::Malformed)?;
-            let h = sb.rect.height().min(sb.cb_height) as usize;
-            (sb.rect.width() as usize)
-                .checked_mul(h)
-                .ok_or(DecodeError::TooLarge)
-        };
-        max_strip_a = max_strip_a.max(strip_len(hl_idx)?).max(strip_len(lh_idx)?);
-        max_strip_b = max_strip_b.max(strip_len(hh_idx)?);
-    }
-    if scratch.strip_a.capacity() < max_strip_a {
-        scratch.strip_a.clear();
-        scratch.strip_a.reserve_exact(max_strip_a);
-    }
-    if scratch.strip_b.capacity() < max_strip_b {
-        scratch.strip_b.clear();
-        scratch.strip_b.reserve_exact(max_strip_b);
+    #[inline(always)]
+    fn row(&self, row: usize) -> Result<&[f32]> {
+        let offset = self.slot(row) * self.width;
+        self.data
+            .get(offset..)
+            .and_then(|s| s.get(..self.width))
+            .ok_or(DecodeError::Malformed)
     }
 
-    decode_sub_band_strip(
-        codestream,
-        tile_decompositions.first_ll_sub_band,
-        0,
-        component_info,
-        bit_plane_ctx,
-        bit_plane_buffers,
-        storage,
-        header,
-        ll_sub_band.rect.y0,
-        ll_sub_band.rect.y1,
-        &mut scratch.strip_b,
-        cancel,
-    )?;
+    #[inline(always)]
+    fn row_mut(&mut self, row: usize) -> Result<&mut [f32]> {
+        let offset = self.slot(row) * self.width;
+        self.data
+            .get_mut(offset..)
+            .and_then(|s| s.get_mut(..self.width))
+            .ok_or(DecodeError::Malformed)
+    }
 
-    let Some((first, middle)) = intermediate.split_first() else {
-        let width = last.rect.width() as usize;
-        let height = last.rect.height() as usize;
-        let dst_stride = output.stride;
-        let dst = output.target_slice(width, height)?;
-        return filter_2d_first(
-            codestream,
-            dst,
-            dst_stride,
-            &mut scratch.low_row,
-            &mut scratch.high_row,
-            &mut scratch.strip_a,
-            &mut scratch.strip_b,
-            bit_plane_ctx,
-            bit_plane_buffers,
-            last,
-            1,
-            component_info,
-            storage,
-            header,
-            cancel,
-        );
-    };
-
-    let mut use_scratch = !intermediate.len().is_multiple_of(2);
-
-    if use_scratch {
-        let len = buffer_size(first);
-        cancel.ensure_len(&mut scratch.buffer, len)?;
-        let dst = scratch
-            .buffer
-            .get_mut(..len)
-            .ok_or(DecodeError::Malformed)?;
-        filter_2d_first(
-            codestream,
-            dst,
-            first.rect.width() as usize,
-            &mut scratch.low_row,
-            &mut scratch.high_row,
-            &mut scratch.strip_a,
-            &mut scratch.strip_b,
-            bit_plane_ctx,
-            bit_plane_buffers,
-            first,
-            1,
-            component_info,
-            storage,
-            header,
-            cancel,
+    #[inline(always)]
+    fn load_row<S: Simd>(
+        &mut self,
+        simd: S,
+        layout: LevelLayout,
+        row_idx: usize,
+        bands: (&[f32], &[f32]),
+        ctx: &mut DecodeCtx<'_>,
+    ) -> Result<()> {
+        let dst = self.row_mut(row_idx)?;
+        let mut horiz = HorizontalFilter::new(
+            layout.spec,
+            layout.low_first_x,
+            layout.num_low_x,
+            layout.num_high_x,
+            ctx,
         )?;
-    } else if use_output_as_scratch {
-        let len = buffer_size(first);
-        let dst = output.data.get_mut(..len).ok_or(DecodeError::Malformed)?;
-        filter_2d_first(
-            codestream,
-            dst,
-            first.rect.width() as usize,
-            &mut scratch.low_row,
-            &mut scratch.high_row,
-            &mut scratch.strip_a,
-            &mut scratch.strip_b,
-            bit_plane_ctx,
-            bit_plane_buffers,
-            first,
-            1,
-            component_info,
-            storage,
-            header,
-            cancel,
-        )?;
-    } else {
-        let len = buffer_size(first);
-        cancel.ensure_len(&mut scratch.aux_buffer, len)?;
-        let dst = scratch
-            .aux_buffer
-            .get_mut(..len)
-            .ok_or(DecodeError::Malformed)?;
-        filter_2d_first(
-            codestream,
-            dst,
-            first.rect.width() as usize,
-            &mut scratch.low_row,
-            &mut scratch.high_row,
-            &mut scratch.strip_a,
-            &mut scratch.strip_b,
-            bit_plane_ctx,
-            bit_plane_buffers,
-            first,
-            1,
-            component_info,
-            storage,
-            header,
-            cancel,
-        )?;
-    }
+        horiz.filter_row(simd, bands.0, bands.1, dst)?;
 
-    for (idx, decomposition) in middle.iter().enumerate() {
-        let resolution = (idx + 2) as u8;
-        use_scratch = !use_scratch;
-        let len = buffer_size(decomposition);
-        let width = decomposition.rect.width() as usize;
-
-        if use_scratch {
-            cancel.ensure_len(&mut scratch.buffer, len)?;
-            let dst = scratch
-                .buffer
-                .get_mut(..len)
-                .ok_or(DecodeError::Malformed)?;
-            let ll: &[f32] = if use_output_as_scratch {
-                output.data
-            } else {
-                &scratch.aux_buffer
-            };
-            filter_2d(
-                codestream,
-                ll,
-                dst,
-                width,
-                &mut scratch.low_row,
-                &mut scratch.high_row,
-                &mut scratch.strip_a,
-                &mut scratch.strip_b,
-                bit_plane_ctx,
-                bit_plane_buffers,
-                decomposition,
-                resolution,
-                component_info,
-                storage,
-                header,
-                cancel,
-            )?;
-        } else if use_output_as_scratch {
-            let dst = output.data.get_mut(..len).ok_or(DecodeError::Malformed)?;
-            filter_2d(
-                codestream,
-                &scratch.buffer,
-                dst,
-                width,
-                &mut scratch.low_row,
-                &mut scratch.high_row,
-                &mut scratch.strip_a,
-                &mut scratch.strip_b,
-                bit_plane_ctx,
-                bit_plane_buffers,
-                decomposition,
-                resolution,
-                component_info,
-                storage,
-                header,
-                cancel,
-            )?;
+        let is_low = row_idx.is_multiple_of(2) == layout.low_first_y;
+        let factor = if layout.height == 1 {
+            if is_low { 1.0 } else { 0.5 }
+        } else if is_low {
+            layout.spec.scale_low
         } else {
-            cancel.ensure_len(&mut scratch.aux_buffer, len)?;
-            let dst = scratch
-                .aux_buffer
-                .get_mut(..len)
-                .ok_or(DecodeError::Malformed)?;
-            filter_2d(
-                codestream,
-                &scratch.buffer,
-                dst,
-                width,
-                &mut scratch.low_row,
-                &mut scratch.high_row,
-                &mut scratch.strip_a,
-                &mut scratch.strip_b,
-                bit_plane_ctx,
-                bit_plane_buffers,
+            layout.spec.scale_high
+        };
+        if factor != 1.0 {
+            self.scale_row(simd, row_idx, factor)?;
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn scale_row<S: Simd>(&mut self, simd: S, row: usize, factor: f32) -> Result<()> {
+        if self.width == 0 {
+            return Ok(());
+        }
+        scale(simd, self.row_mut(row)?, factor);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn lift_row<S: Simd>(
+        &mut self,
+        simd: S,
+        row: usize,
+        height: usize,
+        rule: LiftRule,
+    ) -> Result<()> {
+        if self.width == 0 {
+            return Ok(());
+        }
+        let above_slot = self.slot(mirror_above(row));
+        let below_slot = self.slot(mirror_below(row, height));
+        let slot = self.slot(row);
+        let width = self.width;
+
+        let (rows_before, rest) = self
+            .data
+            .split_at_mut_checked(slot * width)
+            .ok_or(DecodeError::Malformed)?;
+        let (current, rows_after) = rest
+            .split_at_mut_checked(width)
+            .ok_or(DecodeError::Malformed)?;
+        let neighbor = |s: usize| -> Result<&[f32]> {
+            if s < slot {
+                rows_before
+                    .get(s * width..)
+                    .and_then(|r| r.get(..width))
+                    .ok_or(DecodeError::Malformed)
+            } else {
+                let rel = s.checked_sub(slot + 1).ok_or(DecodeError::Malformed)?;
+                rows_after
+                    .get(rel * width..)
+                    .and_then(|r| r.get(..width))
+                    .ok_or(DecodeError::Malformed)
+            }
+        };
+
+        apply_lift_rule(
+            simd,
+            rule,
+            current,
+            neighbor(above_slot)?,
+            neighbor(below_slot)?,
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LevelLayout {
+    spec: &'static FilterSpec,
+    height: usize,
+    low_first_x: bool,
+    low_first_y: bool,
+    num_low_x: usize,
+    num_high_x: usize,
+}
+
+struct LevelSynthesis {
+    hl: BandSource,
+    lh: BandSource,
+    hh: BandSource,
+    layout: LevelLayout,
+    ring: RowRing,
+    loaded: usize,
+    next_step_row: [usize; MAX_LIFT_STEPS],
+    next_y: usize,
+}
+
+impl LevelSynthesis {
+    fn new(
+        decomposition: &Decomposition,
+        resolution: u8,
+        transform: WaveletTransform,
+        storage: &DecompositionStorage,
+    ) -> Result<Self> {
+        let IntRect {
+            x0: u0,
+            x1: u1,
+            y0: v0,
+            ..
+        } = decomposition.rect;
+        let width = decomposition.rect.width() as usize;
+        let height = decomposition.rect.height() as usize;
+        let low_first_x = u0.is_multiple_of(2);
+        let low_first_y = v0.is_multiple_of(2);
+        let spec = FilterSpec::for_transform(transform);
+        let ring_rows = height.min(spec.steps.len() + 2);
+
+        let mut next_step_row = [0_usize; MAX_LIFT_STEPS];
+        for (slot, step) in next_step_row.iter_mut().zip(spec.steps) {
+            *slot = usize::from(step.low != low_first_y);
+        }
+
+        let [hl_idx, lh_idx, hh_idx] = decomposition.sub_bands;
+        Ok(Self {
+            hl: BandSource::new(hl_idx, resolution, storage)?,
+            lh: BandSource::new(lh_idx, resolution, storage)?,
+            hh: BandSource::new(hh_idx, resolution, storage)?,
+            layout: LevelLayout {
+                spec,
+                height,
+                low_first_x,
+                low_first_y,
+                num_low_x: (u1.div_ceil(2) - u0.div_ceil(2)) as usize,
+                num_high_x: (u1 / 2 - u0 / 2) as usize,
+            },
+            ring: RowRing::new(width, ring_rows)?,
+            loaded: 0,
+            next_step_row,
+            next_y: 0,
+        })
+    }
+
+    #[inline(always)]
+    fn is_ready(&self, y: usize) -> bool {
+        if self.layout.height <= 1 {
+            return self.loaded > y;
+        }
+        let is_low = y.is_multiple_of(2) == self.layout.low_first_y;
+        let final_step = self.layout.spec.steps.len() - if is_low { 2 } else { 1 };
+        self.next_step_row
+            .get(final_step)
+            .is_some_and(|&next| next > y)
+    }
+
+    #[inline(always)]
+    fn next_loaded_is_low(&self) -> bool {
+        self.loaded.is_multiple_of(2) == self.layout.low_first_y
+    }
+
+    #[inline(always)]
+    fn take_ready_row(&mut self) -> Result<&[f32]> {
+        let y = self.next_y;
+        if y >= self.layout.height {
+            return Err(DecodeError::Malformed);
+        }
+        self.next_y += 1;
+        self.ring.row(y)
+    }
+
+    #[inline(always)]
+    fn load_low_row<S: Simd>(
+        &mut self,
+        simd: S,
+        low_src: &[f32],
+        ctx: &mut DecodeCtx<'_>,
+    ) -> Result<()> {
+        let row_idx = self.loaded;
+        if row_idx >= self.layout.height {
+            return Err(DecodeError::Malformed);
+        }
+        self.loaded += 1;
+        let high_src = self.hl.next_row(ctx)?;
+        self.ring
+            .load_row(simd, self.layout, row_idx, (low_src, high_src), ctx)
+    }
+
+    #[inline(always)]
+    fn load_high_row<S: Simd>(&mut self, simd: S, ctx: &mut DecodeCtx<'_>) -> Result<()> {
+        let row_idx = self.loaded;
+        if row_idx >= self.layout.height {
+            return Err(DecodeError::Malformed);
+        }
+        self.loaded += 1;
+        let low_src = self.lh.next_row(ctx)?;
+        let high_src = self.hh.next_row(ctx)?;
+        self.ring
+            .load_row(simd, self.layout, row_idx, (low_src, high_src), ctx)
+    }
+
+    #[inline(always)]
+    fn advance_lifting<S: Simd>(&mut self, simd: S) -> Result<()> {
+        let height = self.layout.height;
+        if height <= 1 {
+            return Ok(());
+        }
+        for (k, step) in self.layout.spec.steps.iter().enumerate() {
+            while let Some(&row) = self.next_step_row.get(k) {
+                if row >= height {
+                    break;
+                }
+                let below = mirror_below(row, height);
+                let ready = if k == 0 {
+                    self.loaded > row.max(below)
+                } else {
+                    self.next_step_row
+                        .get(k - 1)
+                        .is_some_and(|&prev_next| prev_next > below)
+                };
+                if !ready {
+                    break;
+                }
+                self.ring.lift_row(simd, row, height, step.rule)?;
+                if let Some(slot) = self.next_step_row.get_mut(k) {
+                    *slot = row + 2;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+struct ComponentSynthesis {
+    ll: BandSource,
+    levels: Vec<LevelSynthesis>,
+}
+
+impl ComponentSynthesis {
+    fn new(
+        storage: &DecompositionStorage,
+        component_idx: usize,
+        component_info: &ComponentInfo,
+        skipped_resolution_levels: u8,
+    ) -> Result<Self> {
+        let tile_decompositions = storage
+            .tile_decompositions
+            .get(component_idx)
+            .ok_or(DecodeError::Malformed)?;
+        let decompositions = storage
+            .decompositions
+            .get(tile_decompositions.decompositions.clone())
+            .ok_or(DecodeError::Malformed)?;
+        let keep = usize::from(
+            component_info
+                .num_resolution_levels()
+                .saturating_sub(skipped_resolution_levels)
+                .saturating_sub(1),
+        );
+        let decompositions = decompositions.get(..keep).ok_or(DecodeError::Malformed)?;
+
+        let ll = BandSource::new(tile_decompositions.first_ll_sub_band, 0, storage)?;
+        let transform = component_info.wavelet_transform();
+        let mut levels = Vec::with_capacity(decompositions.len());
+        for (idx, decomposition) in decompositions.iter().enumerate() {
+            let resolution = (idx + 1) as u8;
+            levels.push(LevelSynthesis::new(
                 decomposition,
                 resolution,
-                component_info,
+                transform,
                 storage,
-                header,
-                cancel,
-            )?;
+            )?);
+        }
+        Ok(Self { ll, levels })
+    }
+
+    #[inline(always)]
+    fn advance_to<S: Simd>(&mut self, simd: S, y: usize, ctx: &mut DecodeCtx<'_>) -> Result<()> {
+        let Some(top) = self.levels.len().checked_sub(1) else {
+            return self.ll.advance_to(y, ctx);
+        };
+        while !self
+            .levels
+            .get(top)
+            .ok_or(DecodeError::Malformed)?
+            .is_ready(y)
+        {
+            let mut cur = top;
+            while cur > 0 {
+                let cur_level = self.levels.get(cur).ok_or(DecodeError::Malformed)?;
+                if !cur_level.next_loaded_is_low() {
+                    break;
+                }
+                let child = self.levels.get(cur - 1).ok_or(DecodeError::Malformed)?;
+                if child.is_ready(child.next_y) {
+                    break;
+                }
+                cur -= 1;
+            }
+            self.step_level(simd, cur, ctx)?;
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn row(&self, y: usize) -> Result<&[f32]> {
+        match self.levels.last() {
+            Some(top) => top.ring.row(y),
+            None => self.ll.row(y),
         }
     }
 
-    let last_resolution = decompositions.len() as u8;
-    let last_width = last.rect.width() as usize;
-    let last_height = last.rect.height() as usize;
-    let dst_stride = output.stride;
-    let dst = output.target_slice(last_width, last_height)?;
-
-    filter_2d(
-        codestream,
-        &scratch.buffer,
-        dst,
-        dst_stride,
-        &mut scratch.low_row,
-        &mut scratch.high_row,
-        &mut scratch.strip_a,
-        &mut scratch.strip_b,
-        bit_plane_ctx,
-        bit_plane_buffers,
-        last,
-        last_resolution,
-        component_info,
-        storage,
-        header,
-        cancel,
-    )
-}
-
-fn filter_2d_first(
-    codestream: &[u8],
-    coefficients: &mut [f32],
-    dst_stride: usize,
-    low_row: &mut Vec<f32>,
-    high_row: &mut Vec<f32>,
-    strip_a: &mut Vec<f32>,
-    strip_b: &mut Vec<f32>,
-    bit_plane_ctx: &mut BitPlaneDecodeContext,
-    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-    decomposition: &Decomposition,
-    resolution: u8,
-    component_info: &ComponentInfo,
-    storage: &DecompositionStorage,
-    header: &Header,
-    cancel: Cancel<'_>,
-) -> Result<()> {
-    let width = decomposition.rect.width() as usize;
-    let height = decomposition.rect.height() as usize;
-    if width == 0 || height == 0 {
-        return Ok(());
+    #[inline(always)]
+    fn step_level<S: Simd>(
+        &mut self,
+        simd: S,
+        level_idx: usize,
+        ctx: &mut DecodeCtx<'_>,
+    ) -> Result<()> {
+        if level_idx == 0 {
+            let level = self.levels.first_mut().ok_or(DecodeError::Malformed)?;
+            if level.next_loaded_is_low() {
+                let low_src = self.ll.next_row(ctx)?;
+                level.load_low_row(simd, low_src, ctx)?;
+            } else {
+                level.load_high_row(simd, ctx)?;
+            }
+            level.advance_lifting(simd)
+        } else {
+            let (lower, upper) = self
+                .levels
+                .split_at_mut_checked(level_idx)
+                .ok_or(DecodeError::Malformed)?;
+            let child = lower.last_mut().ok_or(DecodeError::Malformed)?;
+            let level = upper.first_mut().ok_or(DecodeError::Malformed)?;
+            if level.next_loaded_is_low() {
+                let low_src = child.take_ready_row()?;
+                level.load_low_row(simd, low_src, ctx)?;
+            } else {
+                level.load_high_row(simd, ctx)?;
+            }
+            level.advance_lifting(simd)
+        }
     }
-
-    dispatch!(Level::new(), simd => {
-        let transform = component_info.wavelet_transform();
-        let IntRect {
-            x0: u0,
-            x1: u1,
-            y0: v0,
-            ..
-        } = decomposition.rect;
-        let num_low = (u1.div_ceil(2) - u0.div_ceil(2)) as usize;
-        let num_high = (u1 / 2 - u0 / 2) as usize;
-        let (first_low_row, first_high_row) = if v0.is_multiple_of(2) { (0, 1) } else { (1, 0) };
-        let [hl_idx, lh_idx, hh_idx] = decomposition.sub_bands;
-
-        filter_low_rows_streaming(
-            simd,
-            codestream,
-            strip_b,
-            hl_idx,
-            resolution,
-            component_info,
-            bit_plane_ctx,
-            bit_plane_buffers,
-            storage,
-            header,
-            strip_a,
-            low_row,
-            high_row,
-            coefficients,
-            width,
-            dst_stride,
-            first_low_row,
-            u0.is_multiple_of(2),
-            num_low,
-            num_high,
-            transform,
-            cancel,
-        )?;
-        filter_high_rows_streaming(
-            simd,
-            codestream,
-            lh_idx,
-            hh_idx,
-            resolution,
-            component_info,
-            bit_plane_ctx,
-            bit_plane_buffers,
-            storage,
-            header,
-            strip_a,
-            strip_b,
-            low_row,
-            high_row,
-            coefficients,
-            width,
-            dst_stride,
-            first_high_row,
-            u0.is_multiple_of(2),
-            num_low,
-            num_high,
-            transform,
-            cancel,
-        )?;
-        filter_vertical(
-            simd,
-            coefficients,
-            dst_stride,
-            decomposition.rect,
-            transform,
-            cancel,
-        )
-    })
-}
-
-fn filter_2d(
-    codestream: &[u8],
-    ll: &[f32],
-    coefficients: &mut [f32],
-    dst_stride: usize,
-    low_row: &mut Vec<f32>,
-    high_row: &mut Vec<f32>,
-    strip_a: &mut Vec<f32>,
-    strip_b: &mut Vec<f32>,
-    bit_plane_ctx: &mut BitPlaneDecodeContext,
-    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-    decomposition: &Decomposition,
-    resolution: u8,
-    component_info: &ComponentInfo,
-    storage: &DecompositionStorage,
-    header: &Header,
-    cancel: Cancel<'_>,
-) -> Result<()> {
-    let width = decomposition.rect.width() as usize;
-    let height = decomposition.rect.height() as usize;
-    if width == 0 || height == 0 {
-        return Ok(());
-    }
-
-    dispatch!(Level::new(), simd => {
-        let transform = component_info.wavelet_transform();
-        let IntRect {
-            x0: u0,
-            x1: u1,
-            y0: v0,
-            ..
-        } = decomposition.rect;
-        let num_low = (u1.div_ceil(2) - u0.div_ceil(2)) as usize;
-        let num_high = (u1 / 2 - u0 / 2) as usize;
-        let (first_low_row, first_high_row) = if v0.is_multiple_of(2) { (0, 1) } else { (1, 0) };
-        let [hl_idx, lh_idx, hh_idx] = decomposition.sub_bands;
-
-        filter_low_rows_streaming(
-            simd,
-            codestream,
-            ll,
-            hl_idx,
-            resolution,
-            component_info,
-            bit_plane_ctx,
-            bit_plane_buffers,
-            storage,
-            header,
-            strip_a,
-            low_row,
-            high_row,
-            coefficients,
-            width,
-            dst_stride,
-            first_low_row,
-            u0.is_multiple_of(2),
-            num_low,
-            num_high,
-            transform,
-            cancel,
-        )?;
-        filter_high_rows_streaming(
-            simd,
-            codestream,
-            lh_idx,
-            hh_idx,
-            resolution,
-            component_info,
-            bit_plane_ctx,
-            bit_plane_buffers,
-            storage,
-            header,
-            strip_a,
-            strip_b,
-            low_row,
-            high_row,
-            coefficients,
-            width,
-            dst_stride,
-            first_high_row,
-            u0.is_multiple_of(2),
-            num_low,
-            num_high,
-            transform,
-            cancel,
-        )?;
-        filter_vertical(
-            simd,
-            coefficients,
-            dst_stride,
-            decomposition.rect,
-            transform,
-            cancel,
-        )
-    })
-}
-
-#[inline(always)]
-fn filter_low_rows_streaming<S: Simd>(
-    simd: S,
-    codestream: &[u8],
-    ll: &[f32],
-    hl_idx: usize,
-    resolution: u8,
-    component_info: &ComponentInfo,
-    bit_plane_ctx: &mut BitPlaneDecodeContext,
-    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-    storage: &DecompositionStorage,
-    header: &Header,
-    hl_strip: &mut Vec<f32>,
-    low_row: &mut Vec<f32>,
-    high_row: &mut Vec<f32>,
-    coefficients: &mut [f32],
-    width: usize,
-    dst_stride: usize,
-    first_row: usize,
-    low_first: bool,
-    num_low: usize,
-    num_high: usize,
-    transform: WaveletTransform,
-    cancel: Cancel<'_>,
-) -> Result<()> {
-    let hl_sb = storage
-        .sub_bands
-        .get(hl_idx)
-        .ok_or(DecodeError::Malformed)?;
-    let y0 = hl_sb.rect.y0;
-    let y1 = hl_sb.rect.y1;
-    let cb_height = hl_sb.cb_height;
-    let mut filter =
-        HorizontalFilter::new(transform, low_first, num_low, num_high, low_row, high_row)?;
-
-    let mut abs_y = y0;
-    while abs_y < y1 {
-        let next_grid = (abs_y / cb_height + 1).saturating_mul(cb_height);
-        let abs_y_end = next_grid.min(y1);
-        let v_start = (abs_y - y0) as usize;
-        let strip_h = (abs_y_end - abs_y) as usize;
-
-        decode_sub_band_strip(
-            codestream,
-            hl_idx,
-            resolution,
-            component_info,
-            bit_plane_ctx,
-            bit_plane_buffers,
-            storage,
-            header,
-            abs_y,
-            abs_y_end,
-            hl_strip,
-            cancel,
-        )?;
-
-        let ll_start = v_start.checked_mul(num_low).ok_or(DecodeError::Malformed)?;
-        let ll_len = strip_h.checked_mul(num_low).ok_or(DecodeError::Malformed)?;
-        let ll_slice = ll
-            .get(ll_start..)
-            .and_then(|s| s.get(..ll_len))
-            .ok_or(DecodeError::Malformed)?;
-
-        filter.filter_rows(
-            simd,
-            ll_slice,
-            hl_strip,
-            coefficients,
-            width,
-            dst_stride,
-            first_row + v_start * 2,
-            strip_h,
-            cancel,
-        )?;
-
-        abs_y = abs_y_end;
-    }
-
-    Ok(())
-}
-
-#[inline(always)]
-fn filter_high_rows_streaming<S: Simd>(
-    simd: S,
-    codestream: &[u8],
-    lh_idx: usize,
-    hh_idx: usize,
-    resolution: u8,
-    component_info: &ComponentInfo,
-    bit_plane_ctx: &mut BitPlaneDecodeContext,
-    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-    storage: &DecompositionStorage,
-    header: &Header,
-    lh_strip: &mut Vec<f32>,
-    hh_strip: &mut Vec<f32>,
-    low_row: &mut Vec<f32>,
-    high_row: &mut Vec<f32>,
-    coefficients: &mut [f32],
-    width: usize,
-    dst_stride: usize,
-    first_row: usize,
-    low_first: bool,
-    num_low: usize,
-    num_high: usize,
-    transform: WaveletTransform,
-    cancel: Cancel<'_>,
-) -> Result<()> {
-    let lh_sb = storage
-        .sub_bands
-        .get(lh_idx)
-        .ok_or(DecodeError::Malformed)?;
-    let y0 = lh_sb.rect.y0;
-    let y1 = lh_sb.rect.y1;
-    let cb_height = lh_sb.cb_height;
-    let mut filter =
-        HorizontalFilter::new(transform, low_first, num_low, num_high, low_row, high_row)?;
-
-    let mut abs_y = y0;
-    while abs_y < y1 {
-        let next_grid = (abs_y / cb_height + 1).saturating_mul(cb_height);
-        let abs_y_end = next_grid.min(y1);
-        let v_start = (abs_y - y0) as usize;
-        let strip_h = (abs_y_end - abs_y) as usize;
-
-        decode_sub_band_strip(
-            codestream,
-            lh_idx,
-            resolution,
-            component_info,
-            bit_plane_ctx,
-            bit_plane_buffers,
-            storage,
-            header,
-            abs_y,
-            abs_y_end,
-            lh_strip,
-            cancel,
-        )?;
-        decode_sub_band_strip(
-            codestream,
-            hh_idx,
-            resolution,
-            component_info,
-            bit_plane_ctx,
-            bit_plane_buffers,
-            storage,
-            header,
-            abs_y,
-            abs_y_end,
-            hh_strip,
-            cancel,
-        )?;
-
-        filter.filter_rows(
-            simd,
-            lh_strip,
-            hh_strip,
-            coefficients,
-            width,
-            dst_stride,
-            first_row + v_start * 2,
-            strip_h,
-            cancel,
-        )?;
-
-        abs_y = abs_y_end;
-    }
-
-    Ok(())
 }
 
 struct HorizontalFilter<'a> {
-    transform: WaveletTransform,
+    spec: &'static FilterSpec,
     low_first: bool,
     num_low: usize,
     num_high: usize,
@@ -765,26 +587,32 @@ struct HorizontalFilter<'a> {
 }
 
 impl<'a> HorizontalFilter<'a> {
+    #[inline(always)]
     fn new(
-        transform: WaveletTransform,
+        spec: &'static FilterSpec,
         low_first: bool,
         num_low: usize,
         num_high: usize,
-        low: &'a mut Vec<f32>,
-        high: &'a mut Vec<f32>,
+        ctx: &'a mut DecodeCtx<'_>,
     ) -> Result<Self> {
         let low_len = num_low + 2;
-        if low.len() < low_len {
-            low.resize(low_len, 0.0);
+        if ctx.low_row.len() < low_len {
+            ctx.low_row.resize(low_len, 0.0);
         }
         let high_len = num_high + 2;
-        if high.len() < high_len {
-            high.resize(high_len, 0.0);
+        if ctx.high_row.len() < high_len {
+            ctx.high_row.resize(high_len, 0.0);
         }
-        let low = low.get_mut(..low_len).ok_or(DecodeError::Malformed)?;
-        let high = high.get_mut(..high_len).ok_or(DecodeError::Malformed)?;
+        let low = ctx
+            .low_row
+            .get_mut(..low_len)
+            .ok_or(DecodeError::Malformed)?;
+        let high = ctx
+            .high_row
+            .get_mut(..high_len)
+            .ok_or(DecodeError::Malformed)?;
         Ok(Self {
-            transform,
+            spec,
             low_first,
             num_low,
             num_high,
@@ -794,117 +622,186 @@ impl<'a> HorizontalFilter<'a> {
     }
 
     #[inline(always)]
-    fn filter_rows<S: Simd>(
+    fn filter_row<S: Simd>(
         &mut self,
         simd: S,
-        low_band: &[f32],
-        high_band: &[f32],
-        coefficients: &mut [f32],
-        width: usize,
-        dst_stride: usize,
-        start_row: usize,
-        strip_h: usize,
-        cancel: Cancel<'_>,
+        low_src: &[f32],
+        high_src: &[f32],
+        row: &mut [f32],
     ) -> Result<()> {
-        for v in 0..strip_h {
-            cancel.check()?;
+        let total = self.num_low + self.num_high;
+        if total == 0 {
+            return Ok(());
+        }
+        if low_src.len() != self.num_low || high_src.len() != self.num_high {
+            return Err(DecodeError::Malformed);
+        }
 
-            let row = coefficients
-                .get_mut((start_row + v * 2) * dst_stride..)
-                .and_then(|s| s.get_mut(..width))
-                .ok_or(DecodeError::Malformed)?;
+        let low_dst = self
+            .low
+            .get_mut(1..=self.num_low)
+            .ok_or(DecodeError::Malformed)?;
+        low_dst.copy_from_slice(low_src);
 
-            let low_dst = self
-                .low
-                .get_mut(1..=self.num_low)
-                .ok_or(DecodeError::Malformed)?;
-            let low_src = low_band
-                .get(v * self.num_low..)
-                .and_then(|s| s.get(..self.num_low))
-                .ok_or(DecodeError::Malformed)?;
-            low_dst.copy_from_slice(low_src);
+        let high_dst = self
+            .high
+            .get_mut(1..=self.num_high)
+            .ok_or(DecodeError::Malformed)?;
+        high_dst.copy_from_slice(high_src);
 
-            let high_dst = self
-                .high
-                .get_mut(1..=self.num_high)
-                .ok_or(DecodeError::Malformed)?;
-            let high_src = high_band
-                .get(v * self.num_high..)
-                .and_then(|s| s.get(..self.num_high))
-                .ok_or(DecodeError::Malformed)?;
-            high_dst.copy_from_slice(high_src);
-
-            filter_1d(simd, self.transform, self)?;
-
-            let low = self
-                .low
-                .get(1..=self.num_low)
-                .ok_or(DecodeError::Malformed)?;
-            let high = self
-                .high
-                .get(1..=self.num_high)
-                .ok_or(DecodeError::Malformed)?;
-
-            if self.low_first {
-                interleave_row(simd, low, high, row);
-            } else {
-                interleave_row(simd, high, low, row);
+        if total == 1 {
+            if let Some(dst) = self.high.get_mut(1..=self.num_high) {
+                scale(simd, dst, 0.5);
+            }
+        } else {
+            if self.spec.scale_low != 1.0
+                && let Some(dst) = self.low.get_mut(1..=self.num_low)
+            {
+                scale(simd, dst, self.spec.scale_low);
+            }
+            if self.spec.scale_high != 1.0
+                && let Some(dst) = self.high.get_mut(1..=self.num_high)
+            {
+                scale(simd, dst, self.spec.scale_high);
+            }
+            for step in self.spec.steps {
+                if step.low {
+                    lift_band(
+                        simd,
+                        self.low,
+                        self.high,
+                        usize::from(self.low_first),
+                        step.rule,
+                    );
+                } else {
+                    lift_band(
+                        simd,
+                        self.high,
+                        self.low,
+                        usize::from(!self.low_first),
+                        step.rule,
+                    );
+                }
             }
         }
 
+        let low = self
+            .low
+            .get(1..=self.num_low)
+            .ok_or(DecodeError::Malformed)?;
+        let high = self
+            .high
+            .get(1..=self.num_high)
+            .ok_or(DecodeError::Malformed)?;
+        if self.low_first {
+            interleave_row(simd, low, high, row);
+        } else {
+            interleave_row(simd, high, low, row);
+        }
         Ok(())
     }
 }
 
-impl<S: Simd> Lifting<S> for HorizontalFilter<'_> {
-    #[inline(always)]
-    fn num_samples(&self) -> usize {
-        self.num_low + self.num_high
+pub(crate) fn apply_tile<'a>(
+    ctx: &mut DecodeCtx<'a>,
+    tile_rect: IntRect,
+    component_infos: &'a [ComponentInfo],
+    tile_mct: Option<WaveletTransform>,
+    params: DecodeParams,
+    out: &mut [u8],
+) -> Result<()> {
+    let width = tile_rect.width() as usize;
+    let height = tile_rect.height() as usize;
+    if width == 0 || height == 0 {
+        return Ok(());
     }
 
-    #[inline(always)]
-    fn scale_low(&mut self, simd: S, factor: f32) -> Result<()> {
-        if let Some(dst) = self.low.get_mut(1..=self.num_low) {
-            scale(simd, dst, factor);
+    let image_width = params.width as usize;
+    let x0 = tile_rect.x0 as usize;
+    let y0 = tile_rect.y0 as usize;
+    if x0.checked_add(width).is_none_or(|end| end > image_width)
+        || y0
+            .checked_add(height)
+            .is_none_or(|end| end > params.height as usize)
+    {
+        return Err(DecodeError::Malformed);
+    }
+
+    let num_components = component_infos.len();
+    let mut components = Vec::with_capacity(num_components);
+    for (idx, component_info) in component_infos.iter().enumerate() {
+        check_cancelled(ctx.cancelled)?;
+        components.push(ComponentSynthesis::new(
+            ctx.storage,
+            idx,
+            component_info,
+            params.skipped_resolution_levels,
+        )?);
+    }
+
+    let half_cap = width.div_ceil(2) + 2;
+    if ctx.low_row.len() < half_cap {
+        ctx.low_row.resize(half_cap, 0.0);
+    }
+    if ctx.high_row.len() < half_cap {
+        ctx.high_row.resize(half_cap, 0.0);
+    }
+
+    dispatch!(Level::new(), simd => {
+        for y in 0..height {
+            check_cancelled(ctx.cancelled)?;
+            for (component, component_info) in components.iter_mut().zip(component_infos) {
+                ctx.component_info = component_info;
+                component.advance_to(simd, y, ctx)?;
+            }
+            let row_start = ((y0 + y) * image_width + x0) * num_components;
+            let row_len = width * num_components;
+            let out_row = out
+                .get_mut(row_start..)
+                .and_then(|s| s.get_mut(..row_len))
+                .ok_or(DecodeError::Malformed)?;
+            write_synthesized_row(simd, &components, y, tile_mct, out_row)?;
         }
-
         Ok(())
+    })
+}
+
+#[inline(always)]
+fn write_synthesized_row<S: Simd>(
+    simd: S,
+    components: &[ComponentSynthesis],
+    y: usize,
+    tile_mct: Option<WaveletTransform>,
+    out_row: &mut [u8],
+) -> Result<()> {
+    match components {
+        [s0] => mct::write_row(simd, &[s0.row(y)?], tile_mct, out_row),
+        [s0, s1] => mct::write_row(simd, &[s0.row(y)?, s1.row(y)?], tile_mct, out_row),
+        [s0, s1, s2] => mct::write_row(
+            simd,
+            &[s0.row(y)?, s1.row(y)?, s2.row(y)?],
+            tile_mct,
+            out_row,
+        ),
+        [s0, s1, s2, s3] => mct::write_row(
+            simd,
+            &[s0.row(y)?, s1.row(y)?, s2.row(y)?, s3.row(y)?],
+            tile_mct,
+            out_row,
+        ),
+        _ => return Err(DecodeError::Malformed),
     }
+    Ok(())
+}
 
-    #[inline(always)]
-    fn scale_high(&mut self, simd: S, factor: f32) -> Result<()> {
-        if let Some(dst) = self.high.get_mut(1..=self.num_high) {
-            scale(simd, dst, factor);
-        }
+#[inline(always)]
+fn mirror_above(row: usize) -> usize {
+    if row == 0 { 1 } else { row - 1 }
+}
 
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn lift_low(
-        &mut self,
-        simd: S,
-        f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
-        f_scalar: impl Fn(f32, f32, f32) -> f32,
-    ) -> Result<()> {
-        let offset = usize::from(self.low_first);
-        lift_band(simd, self.low, self.high, offset, f_simd, f_scalar);
-
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn lift_high(
-        &mut self,
-        simd: S,
-        f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
-        f_scalar: impl Fn(f32, f32, f32) -> f32,
-    ) -> Result<()> {
-        let offset = usize::from(!self.low_first);
-        lift_band(simd, self.high, self.low, offset, f_simd, f_scalar);
-
-        Ok(())
-    }
+#[inline(always)]
+fn mirror_below(row: usize, height: usize) -> usize {
+    if row + 1 < height { row + 1 } else { row - 1 }
 }
 
 #[inline(always)]
@@ -913,8 +810,7 @@ fn lift_band<S: Simd>(
     target: &mut [f32],
     source: &mut [f32],
     offset: usize,
-    f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
-    f_scalar: impl Fn(f32, f32, f32) -> f32,
+    rule: LiftRule,
 ) {
     if let [first, second, ..] = source {
         *first = *second;
@@ -936,7 +832,56 @@ fn lift_band<S: Simd>(
         return;
     };
 
-    lift_samples(simd, target, left, right, f_simd, f_scalar);
+    apply_lift_rule(simd, rule, target, left, right);
+}
+
+#[inline(always)]
+fn apply_lift_rule<S: Simd>(
+    simd: S,
+    rule: LiftRule,
+    target: &mut [f32],
+    left: &[f32],
+    right: &[f32],
+) {
+    match rule {
+        LiftRule::MulAdd(coeff) => {
+            let coeff_simd = f32x8::splat(simd, coeff);
+            lift_samples(
+                simd,
+                target,
+                left,
+                right,
+                #[inline(always)]
+                |s, l, r| (l + r).mul_add(coeff_simd, s),
+                #[inline(always)]
+                |s, l, r| math::mul_add(l + r, coeff, s),
+            );
+        }
+        LiftRule::FloorQuarterOffset => {
+            lift_samples(
+                simd,
+                target,
+                left,
+                right,
+                #[inline(always)]
+                |s, l, r| s - ((l + r + 2.0) * 0.25).floor(),
+                #[inline(always)]
+                |s, l, r| s - math::mul_add(l + r, 0.25, 0.5).floor(),
+            );
+        }
+        LiftRule::FloorHalf => {
+            lift_samples(
+                simd,
+                target,
+                left,
+                right,
+                #[inline(always)]
+                |s, l, r| s + ((l + r) * 0.5).floor(),
+                #[inline(always)]
+                |s, l, r| s + ((l + r) * 0.5).floor(),
+            );
+        }
+    }
 }
 
 #[inline(always)]
@@ -971,578 +916,6 @@ fn interleave_row<S: Simd>(simd: S, first: &[f32], second: &[f32], output: &mut 
     if let (Some(&val), Some(dst)) = (first.get(num_pairs), output.get_mut(num_pairs * 2)) {
         *dst = val;
     }
-}
-
-#[inline(always)]
-fn filter_vertical<S: Simd>(
-    simd: S,
-    coefficients: &mut [f32],
-    stride: usize,
-    rect: IntRect,
-    transform: WaveletTransform,
-    cancel: Cancel<'_>,
-) -> Result<()> {
-    let width = rect.width() as usize;
-    let height = rect.height() as usize;
-    let low_first = rect.y0.is_multiple_of(2);
-
-    if low_first {
-        match transform {
-            WaveletTransform::Reversible53 if height >= 4 => {
-                return filter_vertical_53r_fused(
-                    simd,
-                    coefficients,
-                    width,
-                    stride,
-                    height,
-                    cancel,
-                );
-            }
-            WaveletTransform::Irreversible97 if height >= 8 => {
-                return filter_vertical_97i_fused(
-                    simd,
-                    coefficients,
-                    width,
-                    stride,
-                    height,
-                    cancel,
-                );
-            }
-            _ => {}
-        }
-    }
-
-    let mut filter = VerticalFilter {
-        cancel,
-        coefficients,
-        width,
-        stride,
-        height,
-        low_first,
-    };
-
-    filter_1d(simd, transform, &mut filter)
-}
-
-#[inline(always)]
-fn scale_row<S: Simd>(
-    simd: S,
-    coefficients: &mut [f32],
-    width: usize,
-    stride: usize,
-    row: usize,
-    factor: f32,
-) -> Result<()> {
-    let slice = coefficients
-        .get_mut(row * stride..)
-        .and_then(|s| s.get_mut(..width))
-        .ok_or(DecodeError::Malformed)?;
-    scale(simd, slice, factor);
-    Ok(())
-}
-
-#[inline(always)]
-fn lift_row<S: Simd>(
-    simd: S,
-    coefficients: &mut [f32],
-    width: usize,
-    stride: usize,
-    row: usize,
-    above: usize,
-    below: usize,
-    f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
-    f_scalar: impl Fn(f32, f32, f32) -> f32,
-) -> Result<()> {
-    let (rows_before, rest) = coefficients.split_at_mut(row * stride);
-    let (current, rows_after) = rest.split_at_mut(width);
-    let neighbor = |r: usize| -> Result<&[f32]> {
-        if r < row {
-            rows_before
-                .get(r * stride..)
-                .and_then(|s| s.get(..width))
-                .ok_or(DecodeError::Malformed)
-        } else {
-            rows_after
-                .get((r - row) * stride - width..)
-                .and_then(|s| s.get(..width))
-                .ok_or(DecodeError::Malformed)
-        }
-    };
-
-    lift_samples(
-        simd,
-        current,
-        neighbor(above)?,
-        neighbor(below)?,
-        f_simd,
-        f_scalar,
-    );
-    Ok(())
-}
-
-#[inline(always)]
-fn filter_vertical_53r_fused<S: Simd>(
-    simd: S,
-    coefficients: &mut [f32],
-    width: usize,
-    stride: usize,
-    height: usize,
-    cancel: Cancel<'_>,
-) -> Result<()> {
-    let lift_low_simd =
-        |s: f32x8<S>, left: f32x8<S>, right: f32x8<S>| s - ((left + right + 2.0) * 0.25).floor();
-    let lift_low_scalar =
-        |s: f32, left: f32, right: f32| s - math::mul_add(left + right, 0.25, 0.5).floor();
-    let lift_high_simd =
-        |s: f32x8<S>, left: f32x8<S>, right: f32x8<S>| s + ((left + right) * 0.5).floor();
-    let lift_high_scalar = |s: f32, left: f32, right: f32| s + ((left + right) * 0.5).floor();
-
-    lift_row(
-        simd,
-        coefficients,
-        width,
-        stride,
-        0,
-        1,
-        1,
-        lift_low_simd,
-        lift_low_scalar,
-    )?;
-
-    for even in (2..height).step_by(2) {
-        cancel.check()?;
-        let below = if even + 1 < height {
-            even + 1
-        } else {
-            even - 1
-        };
-        lift_row(
-            simd,
-            coefficients,
-            width,
-            stride,
-            even,
-            even - 1,
-            below,
-            lift_low_simd,
-            lift_low_scalar,
-        )?;
-        lift_row(
-            simd,
-            coefficients,
-            width,
-            stride,
-            even - 1,
-            even - 2,
-            even,
-            lift_high_simd,
-            lift_high_scalar,
-        )?;
-    }
-
-    if height.is_multiple_of(2) {
-        let last_odd = height - 1;
-        lift_row(
-            simd,
-            coefficients,
-            width,
-            stride,
-            last_odd,
-            last_odd - 1,
-            last_odd - 1,
-            lift_high_simd,
-            lift_high_scalar,
-        )?;
-    }
-
-    Ok(())
-}
-
-#[inline(always)]
-fn filter_vertical_97i_fused<S: Simd>(
-    simd: S,
-    coefficients: &mut [f32],
-    width: usize,
-    stride: usize,
-    height: usize,
-    cancel: Cancel<'_>,
-) -> Result<()> {
-    const NEG_ALPHA: f32 = 1.586_134_3;
-    const NEG_BETA: f32 = 0.052_980_117;
-    const NEG_GAMMA: f32 = -0.882_911_1;
-    const NEG_DELTA: f32 = -0.443_506_87;
-    const KAPPA: f32 = 1.230_174_1;
-    const INV_KAPPA: f32 = 1.0 / KAPPA;
-
-    let neg_alpha = f32x8::splat(simd, NEG_ALPHA);
-    let neg_beta = f32x8::splat(simd, NEG_BETA);
-    let neg_gamma = f32x8::splat(simd, NEG_GAMMA);
-    let neg_delta = f32x8::splat(simd, NEG_DELTA);
-
-    let delta_simd = |s: f32x8<S>, l: f32x8<S>, r: f32x8<S>| (l + r).mul_add(neg_delta, s);
-    let delta_scalar = |s: f32, l: f32, r: f32| math::mul_add(l + r, NEG_DELTA, s);
-    let gamma_simd = |s: f32x8<S>, l: f32x8<S>, r: f32x8<S>| (l + r).mul_add(neg_gamma, s);
-    let gamma_scalar = |s: f32, l: f32, r: f32| math::mul_add(l + r, NEG_GAMMA, s);
-    let beta_simd = |s: f32x8<S>, l: f32x8<S>, r: f32x8<S>| (l + r).mul_add(neg_beta, s);
-    let beta_scalar = |s: f32, l: f32, r: f32| math::mul_add(l + r, NEG_BETA, s);
-    let alpha_simd = |s: f32x8<S>, l: f32x8<S>, r: f32x8<S>| (l + r).mul_add(neg_alpha, s);
-    let alpha_scalar = |s: f32, l: f32, r: f32| math::mul_add(l + r, NEG_ALPHA, s);
-
-    for even in (0..height).step_by(2) {
-        cancel.check()?;
-        scale_row(simd, coefficients, width, stride, even, KAPPA)?;
-        if even + 1 < height {
-            scale_row(simd, coefficients, width, stride, even + 1, INV_KAPPA)?;
-        }
-
-        let above = if even == 0 { 1 } else { even - 1 };
-        let below = if even + 1 < height {
-            even + 1
-        } else {
-            even - 1
-        };
-        lift_row(
-            simd,
-            coefficients,
-            width,
-            stride,
-            even,
-            above,
-            below,
-            delta_simd,
-            delta_scalar,
-        )?;
-
-        if even >= 2 {
-            lift_row(
-                simd,
-                coefficients,
-                width,
-                stride,
-                even - 1,
-                even - 2,
-                even,
-                gamma_simd,
-                gamma_scalar,
-            )?;
-
-            let beta_row = even - 2;
-            let beta_above = if beta_row == 0 { 1 } else { beta_row - 1 };
-            lift_row(
-                simd,
-                coefficients,
-                width,
-                stride,
-                beta_row,
-                beta_above,
-                beta_row + 1,
-                beta_simd,
-                beta_scalar,
-            )?;
-        }
-
-        if even >= 4 {
-            lift_row(
-                simd,
-                coefficients,
-                width,
-                stride,
-                even - 3,
-                even - 4,
-                even - 2,
-                alpha_simd,
-                alpha_scalar,
-            )?;
-        }
-    }
-
-    let last_even = (height - 1) & !1;
-    if height.is_multiple_of(2) {
-        let last_odd = height - 1;
-        lift_row(
-            simd,
-            coefficients,
-            width,
-            stride,
-            last_odd,
-            last_even,
-            last_even,
-            gamma_simd,
-            gamma_scalar,
-        )?;
-        lift_row(
-            simd,
-            coefficients,
-            width,
-            stride,
-            last_even,
-            last_even - 1,
-            last_odd,
-            beta_simd,
-            beta_scalar,
-        )?;
-        lift_row(
-            simd,
-            coefficients,
-            width,
-            stride,
-            last_even - 1,
-            last_even - 2,
-            last_even,
-            alpha_simd,
-            alpha_scalar,
-        )?;
-        lift_row(
-            simd,
-            coefficients,
-            width,
-            stride,
-            last_odd,
-            last_even,
-            last_even,
-            alpha_simd,
-            alpha_scalar,
-        )?;
-    } else {
-        lift_row(
-            simd,
-            coefficients,
-            width,
-            stride,
-            last_even,
-            last_even - 1,
-            last_even - 1,
-            beta_simd,
-            beta_scalar,
-        )?;
-        lift_row(
-            simd,
-            coefficients,
-            width,
-            stride,
-            last_even - 1,
-            last_even - 2,
-            last_even,
-            alpha_simd,
-            alpha_scalar,
-        )?;
-    }
-
-    Ok(())
-}
-
-struct VerticalFilter<'a> {
-    cancel: Cancel<'a>,
-    coefficients: &'a mut [f32],
-    width: usize,
-    stride: usize,
-    height: usize,
-    low_first: bool,
-}
-
-impl VerticalFilter<'_> {
-    #[inline(always)]
-    fn scale_rows<S: Simd>(&mut self, simd: S, first_row: usize, factor: f32) -> Result<()> {
-        for row in (first_row..self.height).step_by(2) {
-            self.cancel.check()?;
-            scale_row(
-                simd,
-                self.coefficients,
-                self.width,
-                self.stride,
-                row,
-                factor,
-            )?;
-        }
-
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn lift_rows<S: Simd>(
-        &mut self,
-        simd: S,
-        first_row: usize,
-        f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
-        f_scalar: impl Fn(f32, f32, f32) -> f32,
-    ) -> Result<()> {
-        let width = self.width;
-        let stride = self.stride;
-        let height = self.height;
-
-        for row in (first_row..height).step_by(2) {
-            self.cancel.check()?;
-
-            let above = if row == 0 { 1 } else { row - 1 };
-            let below = if row == height - 1 {
-                height - 2
-            } else {
-                row + 1
-            };
-
-            lift_row(
-                simd,
-                self.coefficients,
-                width,
-                stride,
-                row,
-                above,
-                below,
-                &f_simd,
-                &f_scalar,
-            )?;
-        }
-
-        Ok(())
-    }
-}
-
-impl<S: Simd> Lifting<S> for VerticalFilter<'_> {
-    #[inline(always)]
-    fn num_samples(&self) -> usize {
-        self.height
-    }
-
-    #[inline(always)]
-    fn scale_low(&mut self, simd: S, factor: f32) -> Result<()> {
-        self.scale_rows(simd, usize::from(!self.low_first), factor)
-    }
-
-    #[inline(always)]
-    fn scale_high(&mut self, simd: S, factor: f32) -> Result<()> {
-        self.scale_rows(simd, usize::from(self.low_first), factor)
-    }
-
-    #[inline(always)]
-    fn lift_low(
-        &mut self,
-        simd: S,
-        f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
-        f_scalar: impl Fn(f32, f32, f32) -> f32,
-    ) -> Result<()> {
-        self.lift_rows(simd, usize::from(!self.low_first), f_simd, f_scalar)
-    }
-
-    #[inline(always)]
-    fn lift_high(
-        &mut self,
-        simd: S,
-        f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
-        f_scalar: impl Fn(f32, f32, f32) -> f32,
-    ) -> Result<()> {
-        self.lift_rows(simd, usize::from(self.low_first), f_simd, f_scalar)
-    }
-}
-
-trait Lifting<S: Simd> {
-    fn num_samples(&self) -> usize;
-
-    fn scale_low(&mut self, simd: S, factor: f32) -> Result<()>;
-
-    fn scale_high(&mut self, simd: S, factor: f32) -> Result<()>;
-
-    fn lift_low(
-        &mut self,
-        simd: S,
-        f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
-        f_scalar: impl Fn(f32, f32, f32) -> f32,
-    ) -> Result<()>;
-
-    fn lift_high(
-        &mut self,
-        simd: S,
-        f_simd: impl Fn(f32x8<S>, f32x8<S>, f32x8<S>) -> f32x8<S>,
-        f_scalar: impl Fn(f32, f32, f32) -> f32,
-    ) -> Result<()>;
-}
-
-#[inline(always)]
-fn filter_1d<S: Simd>(
-    simd: S,
-    transform: WaveletTransform,
-    signal: &mut impl Lifting<S>,
-) -> Result<()> {
-    if signal.num_samples() == 1 {
-        return signal.scale_high(simd, 0.5);
-    }
-
-    match transform {
-        WaveletTransform::Reversible53 => filter_53r(simd, signal),
-        WaveletTransform::Irreversible97 => filter_97i(simd, signal),
-    }
-}
-
-#[inline(always)]
-fn filter_53r<S: Simd>(simd: S, signal: &mut impl Lifting<S>) -> Result<()> {
-    signal.lift_low(
-        simd,
-        #[inline(always)]
-        |s, left, right| s - ((left + right + 2.0) * 0.25).floor(),
-        #[inline(always)]
-        |s, left, right| s - math::mul_add(left + right, 0.25, 0.5).floor(),
-    )?;
-
-    signal.lift_high(
-        simd,
-        #[inline(always)]
-        |s, left, right| s + ((left + right) * 0.5).floor(),
-        #[inline(always)]
-        |s, left, right| s + ((left + right) * 0.5).floor(),
-    )?;
-
-    Ok(())
-}
-
-#[inline(always)]
-fn filter_97i<S: Simd>(simd: S, signal: &mut impl Lifting<S>) -> Result<()> {
-    const NEG_ALPHA: f32 = 1.586_134_3;
-    const NEG_BETA: f32 = 0.052_980_117;
-    const NEG_GAMMA: f32 = -0.882_911_1;
-    const NEG_DELTA: f32 = -0.443_506_87;
-    const KAPPA: f32 = 1.230_174_1;
-    const INV_KAPPA: f32 = 1.0 / KAPPA;
-
-    let neg_alpha = f32x8::splat(simd, NEG_ALPHA);
-    let neg_beta = f32x8::splat(simd, NEG_BETA);
-    let neg_gamma = f32x8::splat(simd, NEG_GAMMA);
-    let neg_delta = f32x8::splat(simd, NEG_DELTA);
-
-    signal.scale_low(simd, KAPPA)?;
-    signal.scale_high(simd, INV_KAPPA)?;
-
-    signal.lift_low(
-        simd,
-        #[inline(always)]
-        |s, left, right| (left + right).mul_add(neg_delta, s),
-        #[inline(always)]
-        |s, left, right| math::mul_add(left + right, NEG_DELTA, s),
-    )?;
-
-    signal.lift_high(
-        simd,
-        #[inline(always)]
-        |s, left, right| (left + right).mul_add(neg_gamma, s),
-        #[inline(always)]
-        |s, left, right| math::mul_add(left + right, NEG_GAMMA, s),
-    )?;
-
-    signal.lift_low(
-        simd,
-        #[inline(always)]
-        |s, left, right| (left + right).mul_add(neg_beta, s),
-        #[inline(always)]
-        |s, left, right| math::mul_add(left + right, NEG_BETA, s),
-    )?;
-
-    signal.lift_high(
-        simd,
-        #[inline(always)]
-        |s, left, right| (left + right).mul_add(neg_alpha, s),
-        #[inline(always)]
-        |s, left, right| math::mul_add(left + right, NEG_ALPHA, s),
-    )?;
-
-    Ok(())
 }
 
 #[inline(always)]

@@ -3,7 +3,7 @@ use super::decode::{DecompositionStorage, TileDecompositions};
 use super::rect::IntRect;
 use super::tag_tree::TagTree;
 use super::tile::{ResolutionTile, Tile};
-use crate::cancel::Cancel;
+use crate::check_cancelled;
 use crate::error::{DecodeError, Result};
 use core::iter;
 use core::ops::Range;
@@ -18,12 +18,16 @@ pub(crate) fn can_stop_at_discard(tile: &Tile, header: &Header) -> bool {
         )
 }
 
-pub(crate) fn max_decoded_resolutions(tile: &Tile, header: &Header) -> Result<u8> {
+pub(crate) fn max_decoded_resolutions(
+    tile: &Tile,
+    header: &Header,
+    skipped_resolution_levels: u8,
+) -> Result<u8> {
     let mut max_res = 0_u8;
     for component_info in tile.component_infos(header) {
         let res = component_info
             .num_resolution_levels()
-            .checked_sub(header.skipped_resolution_levels)
+            .checked_sub(skipped_resolution_levels)
             .filter(|r| *r > 0)
             .ok_or(DecodeError::Malformed)?;
         max_res = max_res.max(res);
@@ -36,9 +40,9 @@ pub(crate) fn build(
     header: &Header,
     storage: &mut DecompositionStorage,
     skipped_resolution_levels: u8,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
-    build_decompositions(tile, header, storage, skipped_resolution_levels, cancel)
+    build_decompositions(tile, header, storage, skipped_resolution_levels, cancelled)
 }
 
 fn build_decompositions(
@@ -46,10 +50,10 @@ fn build_decompositions(
     header: &Header,
     storage: &mut DecompositionStorage,
     skipped_resolution_levels: u8,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let stop_at_discard = can_stop_at_discard(tile, header);
-    let max_res = max_decoded_resolutions(tile, header)?;
+    let max_res = max_decoded_resolutions(tile, header, skipped_resolution_levels)?;
 
     for component_tile in tile.component_tiles(header) {
         let comp_decoded_resolutions = component_tile
@@ -79,7 +83,7 @@ fn build_decompositions(
                 tile,
                 allocate_layers,
                 storage,
-                cancel,
+                cancelled,
             )?;
 
             let idx = storage.sub_bands.len();
@@ -126,12 +130,12 @@ fn build_precincts(
     tile: &Tile,
     allocate_layers: bool,
     storage: &mut DecompositionStorage,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Range<usize>> {
     let start = storage.precincts.len();
 
     for precinct_data in resolution_tile.precincts().ok_or(DecodeError::Malformed)? {
-        cancel.check()?;
+        check_cancelled(cancelled)?;
 
         let precinct_rect = precinct_data.rect;
 
@@ -166,7 +170,7 @@ fn build_precincts(
             tile,
             allocate_layers,
             storage,
-            cancel,
+            cancelled,
         )?;
 
         let code_inclusion_tree =
@@ -195,7 +199,7 @@ fn build_code_blocks(
     tile: &Tile,
     allocate_layers: bool,
     storage: &mut DecompositionStorage,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Range<usize>> {
     let mut y = code_block_area.y0;
 
@@ -205,7 +209,7 @@ fn build_code_blocks(
     let start = storage.code_blocks.len();
 
     for y_idx in 0..code_blocks_y {
-        cancel.check()?;
+        check_cancelled(cancelled)?;
 
         let mut x = code_block_area.x0;
 

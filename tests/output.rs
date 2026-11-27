@@ -2,7 +2,7 @@ use std::assert_matches;
 use std::fs;
 use std::path::PathBuf;
 
-use subband::{DecodeError, DecodeSettings, DecoderContext, Image};
+use subband::{Decode, DecodeError, DecodeSettings, Image};
 
 const FIXTURES: &[&str] = &[
     "alpha-gradient",
@@ -29,55 +29,54 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 #[test]
-fn write_to_matches_data_u8() {
+fn dirty_buffer_matches_zeroed() {
+    let settings = DecodeSettings::default();
     for &name in FIXTURES {
         let data = fixture(name);
+        let image = Image::from_codestream(&data, &settings)
+            .unwrap_or_else(|e| panic!("{name}: parse failed: {e}"));
         for discard in [0, 2] {
-            let settings = DecodeSettings {
+            let request = Decode {
                 discard,
-                ..DecodeSettings::default()
+                max_layers: None,
             };
-            let image = Image::from_codestream(&data, &settings)
-                .unwrap_or_else(|e| panic!("{name} discard {discard}: parse failed: {e}"));
-            let mut ctx = DecoderContext::default();
-            let decoded = image
-                .decode(&mut ctx)
-                .unwrap_or_else(|e| panic!("{name} discard {discard}: decode failed: {e}"));
-
-            let expected_len = (image.width() as usize)
-                * (image.height() as usize)
-                * usize::from(decoded.components());
+            let [w, h] = image.output_size(&request);
+            let expected_len = (w as usize) * (h as usize) * usize::from(image.components());
             assert_eq!(
-                decoded.buffer_len(),
+                image.output_len(&request),
                 expected_len,
-                "{name} discard {discard}: buffer_len mismatch"
+                "{name} discard {discard}: output_len mismatch"
             );
 
-            let expected = decoded
-                .data_u8()
-                .unwrap_or_else(|e| panic!("{name} discard {discard}: data_u8 failed: {e}"));
-            let mut buf = vec![0; decoded.buffer_len()];
-            decoded
-                .write_to(&mut buf)
-                .unwrap_or_else(|e| panic!("{name} discard {discard}: write_to failed: {e}"));
-            assert_eq!(buf, expected, "{name} discard {discard}: output mismatch");
+            let mut zeroed = vec![0; expected_len];
+            let decoded = image
+                .decode_into(&request, &mut zeroed, || false)
+                .unwrap_or_else(|e| panic!("{name} discard {discard}: decode failed: {e}"));
+            assert_eq!(decoded.width(), w);
+            assert_eq!(decoded.height(), h);
+            assert_eq!(decoded.components(), image.components());
+
+            let mut dirty = vec![0xA5; expected_len];
+            image
+                .decode_into(&request, &mut dirty, || false)
+                .unwrap_or_else(|e| panic!("{name} discard {discard}: dirty decode failed: {e}"));
+            assert_eq!(dirty, zeroed, "{name} discard {discard}: output mismatch");
         }
     }
 }
 
 #[test]
-fn write_to_wrong_size() {
+fn wrong_size() {
     let data = fixture("gray-alpha");
     let image = Image::from_codestream(&data, &DecodeSettings::default()).expect("fixture parses");
-    let mut ctx = DecoderContext::default();
-    let decoded = image.decode(&mut ctx).expect("fixture decodes");
-    let len = decoded.buffer_len();
+    let request = Decode::default();
+    let len = image.output_len(&request);
     assert!(len > 0);
 
     for bad_len in [len - 1, len + 1] {
         let mut buf = vec![0xA5; bad_len];
         assert_matches!(
-            decoded.write_to(&mut buf),
+            image.decode_into(&request, &mut buf, || false),
             Err(DecodeError::BufferSize),
             "buffer len {bad_len} should fail with BufferSize"
         );
@@ -89,10 +88,11 @@ fn write_to_wrong_size() {
 }
 
 #[test]
-fn write_to_component_counts() {
-    let settings = DecodeSettings {
+fn component_counts() {
+    let settings = DecodeSettings::default();
+    let request = Decode {
         discard: 2,
-        ..DecodeSettings::default()
+        max_layers: None,
     };
     for (name, expected_channels) in [
         ("alpha-gradient", 1_u8),
@@ -102,103 +102,37 @@ fn write_to_component_counts() {
     ] {
         let data = fixture(name);
         let image = Image::from_codestream(&data, &settings).expect("fixture parses");
-        let mut ctx = DecoderContext::default();
-        let decoded = image.decode(&mut ctx).expect("fixture decodes");
         assert_eq!(
-            decoded.components(),
+            image.components(),
             expected_channels,
             "{name}: unexpected component count"
         );
-        let expected_len =
-            (image.width() as usize) * (image.height() as usize) * usize::from(expected_channels);
+        let [w, h] = image.output_size(&request);
+        let expected_len = (w as usize) * (h as usize) * usize::from(expected_channels);
         assert_eq!(
-            decoded.buffer_len(),
+            image.output_len(&request),
             expected_len,
-            "{name}: unexpected buffer_len"
+            "{name}: unexpected output_len"
         );
         let mut buf = vec![0; expected_len];
-        decoded
-            .write_to(&mut buf)
-            .unwrap_or_else(|e| panic!("{name}: write_to failed: {e}"));
-        let expected = decoded.data_u8().expect("data_u8 succeeds");
-        assert_eq!(buf, expected, "{name}: output mismatch");
+        let decoded = image
+            .decode_into(&request, &mut buf, || false)
+            .unwrap_or_else(|e| panic!("{name}: decode_into failed: {e}"));
+        assert_eq!(decoded.components(), expected_channels);
+        assert_eq!(decoded.width(), w);
+        assert_eq!(decoded.height(), h);
     }
 }
 
 #[test]
-fn shared_context_matches_fresh() {
-    for discard in [0, 2] {
-        let settings = DecodeSettings {
-            discard,
-            ..DecodeSettings::default()
-        };
-        let mut cases: Vec<(&str, Vec<u8>, Vec<u8>)> = FIXTURES
-            .iter()
-            .map(|&name| {
-                let data = fixture(name);
-                let image = Image::from_codestream(&data, &settings)
-                    .unwrap_or_else(|e| panic!("{name} discard {discard}: parse failed: {e}"));
-                let mut ctx = DecoderContext::default();
-                let decoded = image
-                    .decode(&mut ctx)
-                    .unwrap_or_else(|e| panic!("{name} discard {discard}: decode failed: {e}"));
-                let expected = decoded
-                    .data_u8()
-                    .unwrap_or_else(|e| panic!("{name} discard {discard}: data_u8 failed: {e}"));
-                (name, data, expected)
-            })
-            .collect();
-
-        cases.sort_by_key(|(_, _, expected)| expected.len());
-        let max_len = cases.last().map_or(0, |(_, _, expected)| expected.len());
-
-        for reverse in [false, true] {
-            let mut ctx = DecoderContext::default();
-            let mut buf = vec![0; max_len];
-            let order: Box<dyn Iterator<Item = &(&str, Vec<u8>, Vec<u8>)>> = if reverse {
-                Box::new(cases.iter().rev())
-            } else {
-                Box::new(cases.iter())
-            };
-
-            for (name, data, expected) in order {
-                let image = Image::from_codestream(data, &settings)
-                    .unwrap_or_else(|e| panic!("{name} discard {discard}: parse failed: {e}"));
-                let decoded = image
-                    .decode(&mut ctx)
-                    .unwrap_or_else(|e| panic!("{name} discard {discard}: decode failed: {e}"));
-                let out = buf
-                    .get_mut(..decoded.buffer_len())
-                    .expect("shared buffer fits fixture");
-                decoded
-                    .write_to(out)
-                    .unwrap_or_else(|e| panic!("{name} discard {discard}: write_to failed: {e}"));
-                assert_eq!(
-                    out,
-                    expected.as_slice(),
-                    "{name} discard {discard} reverse={reverse}: shared context output mismatch"
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn shared_context_prefix_matches_fresh() {
-    let warm_data = fixture("rgba-2048-lossy");
-    let warm_image = Image::from_codestream(&warm_data, &DecodeSettings::default())
-        .expect("warm fixture parses");
-    let mut shared = DecoderContext::default();
-    let _ = warm_image
-        .decode(&mut shared)
-        .expect("warm fixture decodes");
-
+fn prefix_dirty_buffer_matches_zeroed() {
+    let settings = DecodeSettings::default();
     for name in ["plywood", "rgba-1024-lrcp", "rgb-1024-rlcp"] {
         let data = fixture(name);
         for discard in [0, 2] {
-            let settings = DecodeSettings {
+            let request = Decode {
                 discard,
-                ..DecodeSettings::default()
+                max_layers: None,
             };
             for cut in [256, 600, 2000, 8192] {
                 let Some(prefix) = data.get(..cut) else {
@@ -208,20 +142,18 @@ fn shared_context_prefix_matches_fresh() {
                     continue;
                 };
 
-                let mut fresh = DecoderContext::default();
-                let expected = image
-                    .decode(&mut fresh)
-                    .unwrap_or_else(|e| panic!("{name} d{discard} cut {cut}: fresh failed: {e}"))
-                    .data_u8()
-                    .expect("fresh data_u8");
-                let actual = image
-                    .decode(&mut shared)
-                    .unwrap_or_else(|e| panic!("{name} d{discard} cut {cut}: shared failed: {e}"))
-                    .data_u8()
-                    .expect("shared data_u8");
+                let len = image.output_len(&request);
+                let mut zeroed = vec![0; len];
+                image
+                    .decode_into(&request, &mut zeroed, || false)
+                    .unwrap_or_else(|e| panic!("{name} d{discard} cut {cut}: zeroed failed: {e}"));
+                let mut dirty = vec![0xA5; len];
+                image
+                    .decode_into(&request, &mut dirty, || false)
+                    .unwrap_or_else(|e| panic!("{name} d{discard} cut {cut}: dirty failed: {e}"));
                 assert_eq!(
-                    actual, expected,
-                    "{name} d{discard} cut {cut}: warmed shared context mismatch"
+                    dirty, zeroed,
+                    "{name} d{discard} cut {cut}: dirty buffer mismatch"
                 );
             }
         }
