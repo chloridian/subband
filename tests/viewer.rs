@@ -15,10 +15,18 @@ fn fixture(name: &str) -> Vec<u8> {
 #[test]
 fn prefix_decode_at_complete_discard() {
     let data = fixture("rgba-1024-lrcp");
-    let prefix = data.get(..2000).expect("fixture is at least 2000 bytes");
+    let header = data.get(..2000).expect("fixture is at least 2000 bytes");
+    let needed = subband::inspect(header, &DecodeSettings::default())
+        .expect("header inspects")
+        .bytes_for(2, None)
+        .expect("discard 2 has a known length");
+    let prefix = data.get(..needed).expect("fixture holds discard 2");
 
     let info = subband::inspect(prefix, &DecodeSettings::default()).expect("prefix inspects");
-    let discard = info.complete_discard().unwrap_or(info.levels());
+    let discard = info
+        .complete_discard()
+        .expect("prefix completes a discard level");
+    assert!(discard <= 2, "discard {discard}");
 
     let settings = DecodeSettings {
         discard,
