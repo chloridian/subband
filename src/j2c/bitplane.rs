@@ -387,7 +387,7 @@ pub(crate) struct BitPlaneDecodeContext {
     strict: bool,
     max_coding_passes: u8,
     sub_band_type: SubBandType,
-    contexts: [ArithmeticDecoderContext; 19],
+    contexts: [ArithmeticDecoderContext; 32],
     current_bit_position: u8,
 }
 
@@ -409,7 +409,7 @@ impl Default for BitPlaneDecodeContext {
             max_coding_passes: 0,
             strict: false,
             sub_band_type: SubBandType::LowLow,
-            contexts: [ArithmeticDecoderContext::default(); 19],
+            contexts: [ArithmeticDecoderContext::default(); 32],
             current_bit_position: 0,
         }
     }
@@ -608,13 +608,7 @@ impl BitPlaneDecodeContext {
     }
 
     fn reset_contexts(&mut self) {
-        for context in &mut self.contexts {
-            context.reset();
-        }
-
-        self.contexts[0].reset_with_index(4);
-        self.contexts[17].reset_with_index(3);
-        self.contexts[18].reset_with_index(46);
+        reset_context_array(&mut self.contexts);
     }
 
     fn reset_for_next_bitplane(&mut self) {
@@ -769,6 +763,16 @@ impl BitPlaneDecodeContext {
             neighbors.all()
         }
     }
+}
+
+fn reset_context_array(contexts: &mut [ArithmeticDecoderContext; 32]) {
+    for context in contexts.iter_mut() {
+        context.reset();
+    }
+
+    contexts[0].reset_with_index(4);
+    contexts[17].reset_with_index(3);
+    contexts[18].reset_with_index(46);
 }
 
 fn cleanup_pass(ctx: &mut BitPlaneDecodeContext, decoder: &mut impl BitDecoder) -> Option<()> {
@@ -1135,14 +1139,26 @@ impl BitDecoder for BypassDecoder<'_> {
 
 mod fast_path {
     use super::{
-        ArithmeticDecoder, BitPlaneDecodeContext, COEFFICIENTS_PADDING, Coefficient,
-        SIGN_CONTEXT_LOOKUP, SubBandType, ZERO_CTX_HH_LOOKUP, ZERO_CTX_HL_LOOKUP,
-        ZERO_CTX_LL_LH_LOOKUP,
+        ArithmeticDecoder, ArithmeticDecoderContext, BitPlaneDecodeContext, COEFFICIENTS_PADDING,
+        Coefficient, CoefficientState, SIGN_CONTEXT_LOOKUP, SubBandType, ZERO_CTX_HH_LOOKUP,
+        ZERO_CTX_HL_LOOKUP, ZERO_CTX_LL_LH_LOOKUP, reset_context_array,
     };
 
     #[inline(always)]
     pub(super) const fn significance_mask(row_in_stripe: u32) -> u32 {
         FLAG_SIGNIFICANT_THIS << (row_in_stripe * FLAGS_PER_COEFFICIENT)
+    }
+
+    struct FastState<'a> {
+        stripe_flags: &'a mut [u32],
+        coefficients: &'a mut [Coefficient],
+        coefficient_states: &'a mut [CoefficientState],
+        contexts: &'a mut [ArithmeticDecoderContext; 32],
+        zero_contexts: &'static [u8; 512],
+        width: usize,
+        stride: usize,
+        stripe_count: usize,
+        current_bit_position: u8,
     }
 
     pub(super) fn handle_coding_passes(
@@ -1152,98 +1168,115 @@ mod fast_path {
         decoder: &mut ArithmeticDecoder<'_>,
     ) -> Option<()> {
         let reset_context_probabilities = ctx.style.reset_context_probabilities;
+        let segmentation_symbols = ctx.style.segmentation_symbols;
+        let bitplanes = ctx.bitplanes;
+        let strict = ctx.strict;
+        let zero_contexts = zero_context_lookup(ctx.sub_band_type);
+
+        let mut state = FastState {
+            stripe_flags: ctx.stripe_flags.get_mut(..ctx.active_stripe_flags)?,
+            coefficients: ctx.coefficients.get_mut(..ctx.active_coefficients)?,
+            coefficient_states: ctx.coefficient_states.get_mut(..ctx.active_coefficients)?,
+            contexts: &mut ctx.contexts,
+            zero_contexts,
+            width: ctx.width as usize,
+            stride: ctx.padded_width as usize,
+            stripe_count: (ctx.height / 4) as usize,
+            current_bit_position: 0,
+        };
 
         for coding_pass in start..end {
             let current_bitplane = coding_pass.div_ceil(3);
-            ctx.current_bit_position = ctx.bitplanes - 1 - current_bitplane;
+            state.current_bit_position = bitplanes - 1 - current_bitplane;
 
             match coding_pass % 3 {
                 0 => {
-                    cleanup_pass(ctx, decoder);
+                    cleanup_pass(&mut state, decoder);
 
-                    if ctx.style.segmentation_symbols {
-                        let b0 = decoder.read_bit(&mut ctx.contexts[18]);
-                        let b1 = decoder.read_bit(&mut ctx.contexts[18]);
-                        let b2 = decoder.read_bit(&mut ctx.contexts[18]);
-                        let b3 = decoder.read_bit(&mut ctx.contexts[18]);
+                    if segmentation_symbols {
+                        let b0 = decoder.read_bit(&mut state.contexts[18]);
+                        let b1 = decoder.read_bit(&mut state.contexts[18]);
+                        let b2 = decoder.read_bit(&mut state.contexts[18]);
+                        let b3 = decoder.read_bit(&mut state.contexts[18]);
 
-                        if (b0 != 1 || b1 != 0 || b2 != 1 || b3 != 0) && ctx.strict {
+                        if (b0 != 1 || b1 != 0 || b2 != 1 || b3 != 0) && strict {
                             return None;
                         }
                     }
-
-                    reset_for_next_bitplane(ctx);
                 }
-                1 => significance_propagation_pass(ctx, decoder),
-                2 => magnitude_refinement_pass(ctx, decoder),
+                1 => significance_propagation_pass(&mut state, decoder),
+                2 => magnitude_refinement_pass(&mut state, decoder),
                 _ => unreachable!(),
             }
 
             if reset_context_probabilities {
-                ctx.reset_contexts();
+                reset_context_array(state.contexts);
             }
         }
 
         Some(())
     }
 
-    fn cleanup_pass(ctx: &mut BitPlaneDecodeContext, decoder: &mut ArithmeticDecoder<'_>) {
-        let zero_contexts = zero_context_lookup(ctx.sub_band_type);
+    #[expect(clippy::indexing_slicing)]
+    fn cleanup_pass(state: &mut FastState<'_>, decoder: &mut ArithmeticDecoder<'_>) {
+        let width = state.width;
+        let stride = state.stride;
+        let stripe_count = state.stripe_count;
+        let padding = COEFFICIENTS_PADDING as usize;
+        let mut flag_base = padding * stride + padding;
+        let mut coefficient_base = padding * stride + padding;
 
-        for_each_stripe_column(
-            ctx,
-            #[inline(always)]
-            |ctx, column| {
-                let mut flags = column.flags;
-                let use_rl = flags == 0;
+        for _ in 0..stripe_count {
+            for x in 0..width {
+                let flag_idx = flag_base + x;
+                let orig_flags = state.stripe_flags[flag_idx];
+                let mut flags = orig_flags;
 
-                macro_rules! cleanup {
-                    ($coefficient_in_stripe:expr) => {
-                        cleanup_coefficient(
-                            ctx,
-                            decoder,
-                            zero_contexts,
-                            column,
-                            &mut flags,
-                            $coefficient_in_stripe,
-                            true,
-                            false,
-                        )
-                    };
-                }
-
-                if use_rl {
-                    let bit = decoder.read_bit(&mut ctx.contexts[17]);
+                if flags == 0 {
+                    let bit = decoder.read_bit(&mut state.contexts[17]);
 
                     if bit == 1 {
-                        let mut num_zeroes = decoder.read_bit(&mut ctx.contexts[18]);
-                        num_zeroes = (num_zeroes << 1) | decoder.read_bit(&mut ctx.contexts[18]);
-                        cleanup_from_run_length(
-                            ctx,
-                            decoder,
-                            zero_contexts,
-                            column,
-                            &mut flags,
-                            num_zeroes,
-                        );
+                        let mut num_zeroes = decoder.read_bit(&mut state.contexts[18]);
+                        num_zeroes = (num_zeroes << 1) | decoder.read_bit(&mut state.contexts[18]);
+                        let column = StripeColumn {
+                            flag_idx,
+                            coefficient_idx: coefficient_base + x,
+                            stride,
+                        };
+                        cleanup_from_run_length(state, decoder, column, &mut flags, num_zeroes);
+                        state.stripe_flags[flag_idx] = flags;
+                    }
+                } else if (flags & FLAG_SIGNIFICANT_ALL) == FLAG_SIGNIFICANT_ALL {
+                    if (flags & FLAG_ZERO_CODED_ALL) != 0 {
+                        state.stripe_flags[flag_idx] = flags & !FLAG_ZERO_CODED_ALL;
                     }
                 } else {
-                    cleanup!(0);
-                    cleanup!(1);
-                    cleanup!(2);
-                    cleanup!(3);
-                }
+                    let column = StripeColumn {
+                        flag_idx,
+                        coefficient_idx: coefficient_base + x,
+                        stride,
+                    };
+                    cleanup_coefficient(state, decoder, column, &mut flags, 0, true, false);
+                    cleanup_coefficient(state, decoder, column, &mut flags, 1, true, false);
+                    cleanup_coefficient(state, decoder, column, &mut flags, 2, true, false);
+                    cleanup_coefficient(state, decoder, column, &mut flags, 3, true, false);
 
-                flags & !FLAG_ZERO_CODED_ALL
-            },
-        );
+                    let next = flags & !FLAG_ZERO_CODED_ALL;
+                    if next != orig_flags {
+                        state.stripe_flags[flag_idx] = next;
+                    }
+                }
+            }
+
+            flag_base += stride;
+            coefficient_base += 4 * stride;
+        }
     }
 
     #[inline(always)]
     fn cleanup_from_run_length(
-        ctx: &mut BitPlaneDecodeContext,
+        state: &mut FastState<'_>,
         decoder: &mut ArithmeticDecoder<'_>,
-        zero_contexts: &[u8; 512],
         column: StripeColumn,
         flags: &mut u32,
         num_zeroes: u32,
@@ -1251,9 +1284,8 @@ mod fast_path {
         macro_rules! decode {
             ($coefficient_in_stripe:expr) => {
                 cleanup_coefficient(
-                    ctx,
+                    state,
                     decoder,
-                    zero_contexts,
                     column,
                     flags,
                     $coefficient_in_stripe,
@@ -1266,9 +1298,8 @@ mod fast_path {
         macro_rules! significant {
             ($coefficient_in_stripe:expr) => {
                 cleanup_coefficient(
-                    ctx,
+                    state,
                     decoder,
-                    zero_contexts,
                     column,
                     flags,
                     $coefficient_in_stripe,
@@ -1300,9 +1331,8 @@ mod fast_path {
 
     #[inline(always)]
     fn cleanup_coefficient(
-        ctx: &mut BitPlaneDecodeContext,
+        state: &mut FastState<'_>,
         decoder: &mut ArithmeticDecoder<'_>,
-        zero_contexts: &[u8; 512],
         column: StripeColumn,
         flags: &mut u32,
         coefficient_in_stripe: u32,
@@ -1317,9 +1347,9 @@ mod fast_path {
             if !already_known_significant {
                 #[expect(clippy::indexing_slicing)]
                 let ctx_label =
-                    zero_contexts[((*flags >> shift) & FLAG_SIGNIFICANT_NEIGHBORS) as usize];
+                    state.zero_contexts[((*flags >> shift) & FLAG_SIGNIFICANT_NEIGHBORS) as usize];
                 #[expect(clippy::indexing_slicing)]
-                let ad_ctx = &mut ctx.contexts[ctx_label as usize];
+                let ad_ctx = &mut state.contexts[(ctx_label & 0x1F) as usize];
                 if decoder.read_bit(ad_ctx) == 0 {
                     return;
                 }
@@ -1327,54 +1357,57 @@ mod fast_path {
 
             let coefficient_idx =
                 column.coefficient_idx + coefficient_in_stripe as usize * column.stride;
-            let sign = decode_sign_bit(ctx, decoder, column, *flags, coefficient_in_stripe);
-            set_initial_significant(ctx, coefficient_idx, sign);
-            set_significant(ctx, column, flags, coefficient_in_stripe, sign);
+            let sign = decode_sign_bit(state, decoder, column, *flags, coefficient_in_stripe);
+            set_initial_significant(state, coefficient_idx, sign);
+            set_significant(state, column, flags, coefficient_in_stripe, sign);
         }
     }
 
+    #[expect(clippy::indexing_slicing)]
     fn significance_propagation_pass(
-        ctx: &mut BitPlaneDecodeContext,
+        state: &mut FastState<'_>,
         decoder: &mut ArithmeticDecoder<'_>,
     ) {
-        let zero_contexts = zero_context_lookup(ctx.sub_band_type);
+        let width = state.width;
+        let stride = state.stride;
+        let stripe_count = state.stripe_count;
+        let padding = COEFFICIENTS_PADDING as usize;
+        let mut flag_base = padding * stride + padding;
+        let mut coefficient_base = padding * stride + padding;
 
-        for_each_stripe_column(
-            ctx,
-            #[inline(always)]
-            |ctx, column| {
-                let mut flags = column.flags;
-
-                macro_rules! propagate {
-                    ($coefficient_in_stripe:expr) => {
-                        significance_propagation_coefficient(
-                            ctx,
-                            decoder,
-                            zero_contexts,
-                            column,
-                            &mut flags,
-                            $coefficient_in_stripe,
-                        )
-                    };
+        for _ in 0..stripe_count {
+            for x in 0..width {
+                let flag_idx = flag_base + x;
+                let orig_flags = state.stripe_flags[flag_idx];
+                if orig_flags == 0 || (orig_flags & FLAG_SIGNIFICANT_ALL) == FLAG_SIGNIFICANT_ALL {
+                    continue;
                 }
 
-                if flags != 0 {
-                    propagate!(0);
-                    propagate!(1);
-                    propagate!(2);
-                    propagate!(3);
-                }
+                let mut flags = orig_flags;
+                let column = StripeColumn {
+                    flag_idx,
+                    coefficient_idx: coefficient_base + x,
+                    stride,
+                };
+                significance_propagation_coefficient(state, decoder, column, &mut flags, 0);
+                significance_propagation_coefficient(state, decoder, column, &mut flags, 1);
+                significance_propagation_coefficient(state, decoder, column, &mut flags, 2);
+                significance_propagation_coefficient(state, decoder, column, &mut flags, 3);
 
-                flags
-            },
-        );
+                if flags != orig_flags {
+                    state.stripe_flags[flag_idx] = flags;
+                }
+            }
+
+            flag_base += stride;
+            coefficient_base += 4 * stride;
+        }
     }
 
     #[inline(always)]
     fn significance_propagation_coefficient(
-        ctx: &mut BitPlaneDecodeContext,
+        state: &mut FastState<'_>,
         decoder: &mut ArithmeticDecoder<'_>,
-        zero_contexts: &[u8; 512],
         column: StripeColumn,
         flags: &mut u32,
         coefficient_in_stripe: u32,
@@ -1387,58 +1420,63 @@ mod fast_path {
 
         if should_propagate {
             #[expect(clippy::indexing_slicing)]
-            let ctx_label = zero_contexts[(shifted_flags & FLAG_SIGNIFICANT_NEIGHBORS) as usize];
+            let ctx_label =
+                state.zero_contexts[(shifted_flags & FLAG_SIGNIFICANT_NEIGHBORS) as usize];
             #[expect(clippy::indexing_slicing)]
-            let bit = decoder.read_bit(&mut ctx.contexts[ctx_label as usize]);
+            let bit = decoder.read_bit(&mut state.contexts[(ctx_label & 0x1F) as usize]);
             *flags |= FLAG_ZERO_CODED_THIS << shift;
 
             if bit == 1 {
                 let coefficient_idx =
                     column.coefficient_idx + coefficient_in_stripe as usize * column.stride;
-                let sign = decode_sign_bit(ctx, decoder, column, *flags, coefficient_in_stripe);
-                set_initial_significant(ctx, coefficient_idx, sign);
-                set_significant(ctx, column, flags, coefficient_in_stripe, sign);
+                let sign = decode_sign_bit(state, decoder, column, *flags, coefficient_in_stripe);
+                set_initial_significant(state, coefficient_idx, sign);
+                set_significant(state, column, flags, coefficient_in_stripe, sign);
             }
         }
     }
 
-    fn magnitude_refinement_pass(
-        ctx: &mut BitPlaneDecodeContext,
-        decoder: &mut ArithmeticDecoder<'_>,
-    ) {
-        for_each_stripe_column(
-            ctx,
-            #[inline(always)]
-            |ctx, column| {
-                let mut flags = column.flags;
+    #[expect(clippy::indexing_slicing)]
+    fn magnitude_refinement_pass(state: &mut FastState<'_>, decoder: &mut ArithmeticDecoder<'_>) {
+        let width = state.width;
+        let stride = state.stride;
+        let stripe_count = state.stripe_count;
+        let padding = COEFFICIENTS_PADDING as usize;
+        let mut flag_base = padding * stride + padding;
+        let mut coefficient_base = padding * stride + padding;
 
-                macro_rules! refine {
-                    ($coefficient_in_stripe:expr) => {
-                        magnitude_refinement_coefficient(
-                            ctx,
-                            decoder,
-                            column,
-                            &mut flags,
-                            $coefficient_in_stripe,
-                        )
-                    };
+        for _ in 0..stripe_count {
+            for x in 0..width {
+                let flag_idx = flag_base + x;
+                let orig_flags = state.stripe_flags[flag_idx];
+                if (orig_flags & FLAG_SIGNIFICANT_ALL) == 0 {
+                    continue;
                 }
 
-                if flags != 0 {
-                    refine!(0);
-                    refine!(1);
-                    refine!(2);
-                    refine!(3);
-                }
+                let mut flags = orig_flags;
+                let column = StripeColumn {
+                    flag_idx,
+                    coefficient_idx: coefficient_base + x,
+                    stride,
+                };
+                magnitude_refinement_coefficient(state, decoder, column, &mut flags, 0);
+                magnitude_refinement_coefficient(state, decoder, column, &mut flags, 1);
+                magnitude_refinement_coefficient(state, decoder, column, &mut flags, 2);
+                magnitude_refinement_coefficient(state, decoder, column, &mut flags, 3);
 
-                flags
-            },
-        );
+                if flags != orig_flags {
+                    state.stripe_flags[flag_idx] = flags;
+                }
+            }
+
+            flag_base += stride;
+            coefficient_base += 4 * stride;
+        }
     }
 
     #[inline(always)]
     fn magnitude_refinement_coefficient(
-        ctx: &mut BitPlaneDecodeContext,
+        state: &mut FastState<'_>,
         decoder: &mut ArithmeticDecoder<'_>,
         column: StripeColumn,
         flags: &mut u32,
@@ -1452,15 +1490,15 @@ mod fast_path {
         if should_decode_refinement {
             let ctx_label = magnitude_refinement_context(shifted_flags);
             #[expect(clippy::indexing_slicing)]
-            let bit = decoder.read_bit(&mut ctx.contexts[ctx_label as usize]);
+            let bit = decoder.read_bit(&mut state.contexts[(ctx_label & 0x1F) as usize]);
             let coefficient_idx =
                 column.coefficient_idx + coefficient_in_stripe as usize * column.stride;
             if bit == 1 {
-                push_magnitude_bit(ctx, coefficient_idx, bit);
+                push_magnitude_bit(state, coefficient_idx, bit);
             }
             #[expect(clippy::indexing_slicing)]
-            ctx.coefficient_states[coefficient_idx]
-                .set_decoded_bit_position(ctx.current_bit_position);
+            state.coefficient_states[coefficient_idx]
+                .set_decoded_bit_position(state.current_bit_position);
             *flags |= FLAG_MAGNITUDE_REFINED_THIS << shift;
         }
     }
@@ -1468,7 +1506,7 @@ mod fast_path {
     #[inline(always)]
     #[expect(clippy::indexing_slicing)]
     fn decode_sign_bit(
-        ctx: &mut BitPlaneDecodeContext,
+        state: &mut FastState<'_>,
         decoder: &mut ArithmeticDecoder<'_>,
         column: StripeColumn,
         flags: u32,
@@ -1476,8 +1514,8 @@ mod fast_path {
     ) -> u32 {
         let shift = coefficient_in_stripe * FLAGS_PER_COEFFICIENT;
         let shifted_flags = flags >> shift;
-        let left_flags = ctx.stripe_flags[column.flag_idx - 1];
-        let right_flags = ctx.stripe_flags[column.flag_idx + 1];
+        let left_flags = state.stripe_flags[column.flag_idx - 1];
+        let right_flags = state.stripe_flags[column.flag_idx + 1];
 
         let top_sign = if coefficient_in_stripe == 0 {
             (flags >> FLAG_SIGN_TOP_STRIPE_SHIFT) & 1
@@ -1500,7 +1538,7 @@ mod fast_path {
             | (((shifted_flags & FLAG_SIGNIFICANT_BOTTOM) != 0) as u32) << 7;
 
         let (ctx_label, xor_bit) = SIGN_CONTEXT_STRIPE_LOOKUP[lookup as usize];
-        decoder.read_bit(&mut ctx.contexts[ctx_label as usize]) ^ xor_bit as u32
+        decoder.read_bit(&mut state.contexts[(ctx_label & 0x1F) as usize]) ^ xor_bit as u32
     }
 
     #[inline(always)]
@@ -1521,71 +1559,29 @@ mod fast_path {
         }
     }
 
-    #[inline(always)]
-    fn reset_for_next_bitplane(ctx: &mut BitPlaneDecodeContext) {
-        if let Some(flags) = ctx.stripe_flags.get_mut(..ctx.active_stripe_flags) {
-            for flag in flags {
-                *flag &= !FLAG_ZERO_CODED_ALL;
-            }
-        }
-    }
-
     #[derive(Copy, Clone)]
     struct StripeColumn {
         flag_idx: usize,
         coefficient_idx: usize,
-        flags: u32,
         stride: usize,
     }
 
     #[inline(always)]
-    fn for_each_stripe_column(
-        ctx: &mut BitPlaneDecodeContext,
-        mut action: impl FnMut(&mut BitPlaneDecodeContext, StripeColumn) -> u32,
-    ) {
-        let width = ctx.width as usize;
-        let stride = ctx.padded_width as usize;
-        let stripe_count = (ctx.height / 4) as usize;
-        let padding = COEFFICIENTS_PADDING as usize;
-        let mut flag_base = padding * stride + padding;
-        let mut coefficient_base = padding * stride + padding;
-
-        #[expect(clippy::indexing_slicing)]
-        for _ in 0..stripe_count {
-            for x in 0..width {
-                let flag_idx = flag_base + x;
-                let column = StripeColumn {
-                    flag_idx,
-                    coefficient_idx: coefficient_base + x,
-                    flags: ctx.stripe_flags[flag_idx],
-                    stride,
-                };
-                let flags = action(ctx, column);
-
-                ctx.stripe_flags[flag_idx] = flags;
-            }
-
-            flag_base += stride;
-            coefficient_base += 4 * stride;
-        }
+    #[expect(clippy::indexing_slicing)]
+    fn push_magnitude_bit(state: &mut FastState<'_>, idx: usize, bit: u32) {
+        state.coefficients[idx].push_bit_at(bit, state.current_bit_position);
     }
 
     #[inline(always)]
     #[expect(clippy::indexing_slicing)]
-    fn push_magnitude_bit(ctx: &mut BitPlaneDecodeContext, idx: usize, bit: u32) {
-        ctx.coefficients[idx].push_bit_at(bit, ctx.current_bit_position);
-    }
-
-    #[inline(always)]
-    #[expect(clippy::indexing_slicing)]
-    fn set_initial_significant(ctx: &mut BitPlaneDecodeContext, idx: usize, sign: u32) {
-        ctx.coefficients[idx] = Coefficient::initial(ctx.current_bit_position, sign as u8);
+    fn set_initial_significant(state: &mut FastState<'_>, idx: usize, sign: u32) {
+        state.coefficients[idx] = Coefficient::initial(state.current_bit_position, sign as u8);
     }
 
     #[inline(always)]
     #[expect(clippy::indexing_slicing)]
     fn set_significant(
-        ctx: &mut BitPlaneDecodeContext,
+        state: &mut FastState<'_>,
         column: StripeColumn,
         flags: &mut u32,
         coefficient_in_stripe: u32,
@@ -1594,25 +1590,27 @@ mod fast_path {
         let shift = coefficient_in_stripe * FLAGS_PER_COEFFICIENT;
         let coefficient_idx =
             column.coefficient_idx + coefficient_in_stripe as usize * column.stride;
-        ctx.coefficient_states[coefficient_idx].set_decoded_bit_position(ctx.current_bit_position);
+        state.coefficient_states[coefficient_idx]
+            .set_decoded_bit_position(state.current_bit_position);
 
-        ctx.stripe_flags[column.flag_idx - 1] |= FLAG_SIGNIFICANT_RIGHT << shift;
+        state.stripe_flags[column.flag_idx - 1] |= FLAG_SIGNIFICANT_RIGHT << shift;
         *flags |= ((sign << FLAG_SIGN_THIS_SHIFT) | FLAG_SIGNIFICANT_THIS) << shift;
-        ctx.stripe_flags[column.flag_idx + 1] |= FLAG_SIGNIFICANT_LEFT << shift;
+        state.stripe_flags[column.flag_idx + 1] |= FLAG_SIGNIFICANT_LEFT << shift;
 
         if coefficient_in_stripe == 0 {
             let top = column.flag_idx - column.stride;
-            ctx.stripe_flags[top] |= (sign << FLAG_SIGN_BOTTOM_STRIPE_SHIFT)
+            state.stripe_flags[top] |= (sign << FLAG_SIGN_BOTTOM_STRIPE_SHIFT)
                 | (FLAG_SIGNIFICANT_BOTTOM << LAST_COEFFICIENT_SHIFT);
-            ctx.stripe_flags[top - 1] |= FLAG_SIGNIFICANT_BOTTOM_RIGHT << LAST_COEFFICIENT_SHIFT;
-            ctx.stripe_flags[top + 1] |= FLAG_SIGNIFICANT_BOTTOM_LEFT << LAST_COEFFICIENT_SHIFT;
+            state.stripe_flags[top - 1] |= FLAG_SIGNIFICANT_BOTTOM_RIGHT << LAST_COEFFICIENT_SHIFT;
+            state.stripe_flags[top + 1] |= FLAG_SIGNIFICANT_BOTTOM_LEFT << LAST_COEFFICIENT_SHIFT;
         }
 
         if coefficient_in_stripe == 3 {
             let bottom = column.flag_idx + column.stride;
-            ctx.stripe_flags[bottom] |= (sign << FLAG_SIGN_TOP_STRIPE_SHIFT) | FLAG_SIGNIFICANT_TOP;
-            ctx.stripe_flags[bottom - 1] |= FLAG_SIGNIFICANT_TOP_RIGHT;
-            ctx.stripe_flags[bottom + 1] |= FLAG_SIGNIFICANT_TOP_LEFT;
+            state.stripe_flags[bottom] |=
+                (sign << FLAG_SIGN_TOP_STRIPE_SHIFT) | FLAG_SIGNIFICANT_TOP;
+            state.stripe_flags[bottom - 1] |= FLAG_SIGNIFICANT_TOP_RIGHT;
+            state.stripe_flags[bottom + 1] |= FLAG_SIGNIFICANT_TOP_LEFT;
         }
     }
 
@@ -1628,6 +1626,10 @@ mod fast_path {
     const FLAG_SIGNIFICANT_BOTTOM_LEFT: u32 = 1 << 6;
     const FLAG_SIGNIFICANT_BOTTOM: u32 = 1 << 7;
     const FLAG_SIGNIFICANT_BOTTOM_RIGHT: u32 = 1 << 8;
+    const FLAG_SIGNIFICANT_ALL: u32 = FLAG_SIGNIFICANT_THIS
+        | (FLAG_SIGNIFICANT_THIS << FLAGS_PER_COEFFICIENT)
+        | (FLAG_SIGNIFICANT_THIS << (2 * FLAGS_PER_COEFFICIENT))
+        | (FLAG_SIGNIFICANT_THIS << LAST_COEFFICIENT_SHIFT);
     const FLAG_SIGNIFICANT_NEIGHBORS: u32 = FLAG_SIGNIFICANT_TOP_LEFT
         | FLAG_SIGNIFICANT_TOP
         | FLAG_SIGNIFICANT_TOP_RIGHT
