@@ -83,7 +83,7 @@ jobs:
       - run: cargo test --release --locked --doc
 
   bench:
-    runs-on: ubuntu-latest
+    runs-on: codspeed-macro-x64-ryzen-9950x-ubuntu-24-04
     permissions:
       contents: read
       id-token: write
@@ -96,8 +96,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-codspeed
-      - run: cargo codspeed build
+      - run: cargo codspeed build -m walltime
       - uses: CodSpeedHQ/action@v5
         with:
-          mode: simulation
+          mode: walltime
           run: cargo codspeed run
