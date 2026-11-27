@@ -11,6 +11,7 @@ mod prefix;
 mod quantization;
 mod roi;
 mod tile_parts;
+mod viewer;
 mod wavelet;
 
 use std::fs::{self, File};
@@ -129,7 +130,7 @@ fn decode(stream: &str, settings: &DecodeSettings) -> Result<Decoded, String> {
     Ok(Decoded {
         width,
         height,
-        channels: decoded.components().len(),
+        channels: usize::from(decoded.components()),
         samples: decoded.data_u8().map_err(|e| e.to_string())?,
     })
 }

@@ -134,7 +134,7 @@ fn fixtures_discard_edges() {
             let samples = decoded.data_u8().unwrap();
             assert_eq!(
                 samples.len(),
-                expected_w as usize * expected_h as usize * decoded.components().len(),
+                expected_w as usize * expected_h as usize * usize::from(decoded.components()),
                 "{} discard {discard} sample count",
                 path.display()
             );

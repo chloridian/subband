@@ -127,17 +127,26 @@ fn verify_prefixes(name: &str, discard: u8, strict: bool) {
                 "{name} len={len}: layers_received {l} > {full_layers}"
             );
         }
-        for comp in decoded.components() {
-            assert_eq!(
-                comp.samples().len(),
-                expected_samples,
-                "{name} len={len}: component sample count"
-            );
-        }
+        assert_eq!(
+            decoded.width(),
+            expected_width,
+            "{name} len={len}: decoded width"
+        );
+        assert_eq!(
+            decoded.height(),
+            expected_height,
+            "{name} len={len}: decoded height"
+        );
+        let expected_bytes = expected_samples * usize::from(decoded.components());
+        assert_eq!(
+            decoded.buffer_len(),
+            expected_bytes,
+            "{name} len={len}: buffer_len"
+        );
         let out = decoded.data_u8().expect("not cancelled");
         assert_eq!(
             out.len(),
-            expected_samples * decoded.components().len(),
+            expected_bytes,
             "{name} len={len}: output byte count"
         );
     }
