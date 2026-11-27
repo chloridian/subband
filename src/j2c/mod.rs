@@ -30,14 +30,8 @@ pub(crate) struct ParsedCodestream<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct ComponentData {
+pub(crate) struct ComponentData {
     pub(crate) container: SimdBuffer<{ SIMD_WIDTH }>,
-}
-
-impl ComponentData {
-    pub fn samples(&self) -> &[f32] {
-        self.container.truncated()
-    }
 }
 
 pub(crate) fn parse<'a>(stream: &'a [u8], settings: &DecodeSettings) -> Result<Image<'a>> {

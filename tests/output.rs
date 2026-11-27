@@ -44,8 +44,9 @@ fn write_to_matches_data_u8() {
                 .decode(&mut ctx)
                 .unwrap_or_else(|e| panic!("{name} discard {discard}: decode failed: {e}"));
 
-            let expected_len =
-                (image.width() as usize) * (image.height() as usize) * decoded.components().len();
+            let expected_len = (image.width() as usize)
+                * (image.height() as usize)
+                * usize::from(decoded.components());
             assert_eq!(
                 decoded.buffer_len(),
                 expected_len,
@@ -94,7 +95,7 @@ fn write_to_component_counts() {
         ..DecodeSettings::default()
     };
     for (name, expected_channels) in [
-        ("alpha-gradient", 1_usize),
+        ("alpha-gradient", 1_u8),
         ("gray-alpha", 2),
         ("white", 3),
         ("rgba-1024-lrcp", 4),
@@ -104,11 +105,12 @@ fn write_to_component_counts() {
         let mut ctx = DecoderContext::default();
         let decoded = image.decode(&mut ctx).expect("fixture decodes");
         assert_eq!(
-            decoded.components().len(),
+            decoded.components(),
             expected_channels,
             "{name}: unexpected component count"
         );
-        let expected_len = (image.width() as usize) * (image.height() as usize) * expected_channels;
+        let expected_len =
+            (image.width() as usize) * (image.height() as usize) * usize::from(expected_channels);
         assert_eq!(
             decoded.buffer_len(),
             expected_len,

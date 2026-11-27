@@ -1,7 +1,8 @@
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
 mod cancel;
-pub mod error;
+mod error;
 mod j2c;
 mod jp2;
 pub(crate) mod math;
@@ -14,7 +15,7 @@ use crate::cancel::{CHUNK, Cancel};
 pub use crate::cancel::{CancelCheck, CancelHandle};
 pub use crate::error::{DecodeError, Result};
 use crate::j2c::Header;
-pub use crate::j2c::{ComponentData, DecoderContext, Inspection};
+pub use crate::j2c::{DecoderContext, Inspection};
 pub use crate::jp2::DecodedImage;
 use crate::math::{Level, Simd, dispatch};
 
@@ -91,6 +92,10 @@ impl<'a> Image<'a> {
         self.header.size_data.image_height()
     }
 
+    pub fn components(&self) -> u8 {
+        self.header.component_infos.len() as u8
+    }
+
     pub fn levels(&self) -> u8 {
         self.header.levels
     }
@@ -111,14 +116,24 @@ impl<'a> Image<'a> {
         Ok(DecodedImage {
             decoded_components,
             layers_received: &decoder_context.layers_received,
+            width: self.width(),
+            height: self.height(),
             cancel: settings.cancel.clone(),
         })
     }
 }
 
 impl DecodedImage<'_> {
-    pub fn components(&self) -> &[ComponentData] {
-        self.decoded_components
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn components(&self) -> u8 {
+        self.decoded_components.len() as u8
     }
 
     pub fn layers_received(&self) -> &[u8] {
@@ -126,11 +141,9 @@ impl DecodedImage<'_> {
     }
 
     pub fn buffer_len(&self) -> usize {
-        let components = self.components();
-        components
-            .first()
-            .map_or(0, |c| c.samples().len())
-            .saturating_mul(components.len())
+        (self.width as usize)
+            .saturating_mul(self.height as usize)
+            .saturating_mul(usize::from(self.components()))
     }
 
     pub fn data_u8(&self) -> Result<Vec<u8>> {
