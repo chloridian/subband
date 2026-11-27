@@ -3,6 +3,7 @@ const QE_TABLE_LEN: usize = STATE_MASK as usize + 1;
 
 static QE_TABLE: [QeData; QE_TABLE_LEN] = padded(QE_STATES);
 
+#[derive(Copy, Clone)]
 pub(crate) struct ArithmeticDecoder<'a> {
     data: &'a [u8],
     c: u32,
@@ -80,29 +81,31 @@ impl<'a> ArithmeticDecoder<'a> {
     #[inline(always)]
     #[expect(clippy::indexing_slicing)]
     pub(crate) fn decode(&mut self, context: &mut ArithmeticDecoderContext) -> u32 {
-        let qe_entry = &QE_TABLE[context.index() as usize];
+        let qe_entry = QE_TABLE[context.index() as usize];
+        let qe = u32::from(qe_entry.qe);
 
-        self.a -= qe_entry.qe;
+        self.a -= qe;
+        let a_shifted = self.a << 16;
 
-        if (self.c >> 16) < self.a && self.a & 0x8000 != 0 {
+        if self.a >= 0x8000 && self.c < a_shifted {
             return context.mps();
         }
 
-        let is_lps = ((self.c >> 16) >= self.a) as u32;
-
+        let is_lps = (self.c >= a_shifted) as u32;
         let lps_mask = is_lps.wrapping_neg();
-        self.c -= (self.a << 16) & lps_mask;
+        self.c -= a_shifted & lps_mask;
 
-        let cond = (self.a < qe_entry.qe) as u32;
+        let cond = (self.a < qe) as u32;
+        self.a = (self.a & !lps_mask) | (qe & lps_mask);
 
-        self.a = (self.a & !lps_mask) | (qe_entry.qe & lps_mask);
+        let flip = cond ^ is_lps;
+        let d = context.mps() ^ flip;
 
-        let d = context.mps() ^ cond ^ is_lps;
-
-        context.xor_mps((cond ^ is_lps) & (qe_entry.switch as u32));
-
-        let pick_nlps = ((cond ^ is_lps) as u8).wrapping_neg();
-        context.set_index(qe_entry.nmps ^ ((qe_entry.nmps ^ qe_entry.nlps) & pick_nlps));
+        let pick_nlps = (flip as u8).wrapping_neg();
+        let new_mps = (context.0 ^ (qe_entry.nlps_and_switch & pick_nlps)) & 0x80;
+        let new_idx =
+            qe_entry.nmps ^ ((qe_entry.nmps ^ (qe_entry.nlps_and_switch & STATE_MASK)) & pick_nlps);
+        context.0 = new_mps | new_idx;
 
         self.renormalize();
 
@@ -125,16 +128,6 @@ impl ArithmeticDecoderContext {
     }
 
     #[inline(always)]
-    fn set_index(&mut self, index: u8) {
-        self.0 = (self.0 & 0x80) | index;
-    }
-
-    #[inline(always)]
-    fn xor_mps(&mut self, val: u32) {
-        self.0 ^= ((val & 1) << 7) as u8;
-    }
-
-    #[inline(always)]
     pub(crate) fn reset(&mut self) {
         self.0 = 0;
     }
@@ -147,10 +140,9 @@ impl ArithmeticDecoderContext {
 
 #[derive(Debug, Clone, Copy)]
 struct QeData {
-    qe: u32,
+    qe: u16,
     nmps: u8,
-    nlps: u8,
-    switch: bool,
+    nlps_and_switch: u8,
 }
 
 macro_rules! qe {
@@ -160,8 +152,7 @@ macro_rules! qe {
                 QeData {
                     qe: $qe,
                     nmps: $nmps,
-                    nlps: $nlps,
-                    switch: $switch,
+                    nlps_and_switch: $nlps | (($switch as u8) << 7),
                 }
             ),+
         ]

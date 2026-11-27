@@ -1219,6 +1219,7 @@ mod fast_path {
 
     #[expect(clippy::indexing_slicing)]
     fn cleanup_pass(state: &mut FastState<'_>, decoder: &mut ArithmeticDecoder<'_>) {
+        let mut dec = *decoder;
         let width = state.width;
         let stride = state.stride;
         let stripe_count = state.stripe_count;
@@ -1233,17 +1234,17 @@ mod fast_path {
                 let mut flags = orig_flags;
 
                 if flags == 0 {
-                    let bit = decoder.read_bit(&mut state.contexts[17]);
+                    let bit = dec.read_bit(&mut state.contexts[17]);
 
                     if bit == 1 {
-                        let mut num_zeroes = decoder.read_bit(&mut state.contexts[18]);
-                        num_zeroes = (num_zeroes << 1) | decoder.read_bit(&mut state.contexts[18]);
+                        let mut num_zeroes = dec.read_bit(&mut state.contexts[18]);
+                        num_zeroes = (num_zeroes << 1) | dec.read_bit(&mut state.contexts[18]);
                         let column = StripeColumn {
                             flag_idx,
                             coefficient_idx: coefficient_base + x,
                             stride,
                         };
-                        cleanup_from_run_length(state, decoder, column, &mut flags, num_zeroes);
+                        cleanup_from_run_length(state, &mut dec, column, &mut flags, num_zeroes);
                         state.stripe_flags[flag_idx] = flags;
                     }
                 } else if (flags & FLAG_SIGNIFICANT_ALL) == FLAG_SIGNIFICANT_ALL {
@@ -1256,10 +1257,10 @@ mod fast_path {
                         coefficient_idx: coefficient_base + x,
                         stride,
                     };
-                    cleanup_coefficient(state, decoder, column, &mut flags, 0, true, false);
-                    cleanup_coefficient(state, decoder, column, &mut flags, 1, true, false);
-                    cleanup_coefficient(state, decoder, column, &mut flags, 2, true, false);
-                    cleanup_coefficient(state, decoder, column, &mut flags, 3, true, false);
+                    cleanup_coefficient(state, &mut dec, column, &mut flags, 0, true, false);
+                    cleanup_coefficient(state, &mut dec, column, &mut flags, 1, true, false);
+                    cleanup_coefficient(state, &mut dec, column, &mut flags, 2, true, false);
+                    cleanup_coefficient(state, &mut dec, column, &mut flags, 3, true, false);
 
                     let next = flags & !FLAG_ZERO_CODED_ALL;
                     if next != orig_flags {
@@ -1271,6 +1272,8 @@ mod fast_path {
             flag_base += stride;
             coefficient_base += 4 * stride;
         }
+
+        *decoder = dec;
     }
 
     #[inline(always)]
@@ -1368,6 +1371,7 @@ mod fast_path {
         state: &mut FastState<'_>,
         decoder: &mut ArithmeticDecoder<'_>,
     ) {
+        let mut dec = *decoder;
         let width = state.width;
         let stride = state.stride;
         let stripe_count = state.stripe_count;
@@ -1389,10 +1393,10 @@ mod fast_path {
                     coefficient_idx: coefficient_base + x,
                     stride,
                 };
-                significance_propagation_coefficient(state, decoder, column, &mut flags, 0);
-                significance_propagation_coefficient(state, decoder, column, &mut flags, 1);
-                significance_propagation_coefficient(state, decoder, column, &mut flags, 2);
-                significance_propagation_coefficient(state, decoder, column, &mut flags, 3);
+                significance_propagation_coefficient(state, &mut dec, column, &mut flags, 0);
+                significance_propagation_coefficient(state, &mut dec, column, &mut flags, 1);
+                significance_propagation_coefficient(state, &mut dec, column, &mut flags, 2);
+                significance_propagation_coefficient(state, &mut dec, column, &mut flags, 3);
 
                 if flags != orig_flags {
                     state.stripe_flags[flag_idx] = flags;
@@ -1402,6 +1406,8 @@ mod fast_path {
             flag_base += stride;
             coefficient_base += 4 * stride;
         }
+
+        *decoder = dec;
     }
 
     #[inline(always)]
@@ -1438,6 +1444,7 @@ mod fast_path {
 
     #[expect(clippy::indexing_slicing)]
     fn magnitude_refinement_pass(state: &mut FastState<'_>, decoder: &mut ArithmeticDecoder<'_>) {
+        let mut dec = *decoder;
         let width = state.width;
         let stride = state.stride;
         let stripe_count = state.stripe_count;
@@ -1459,10 +1466,10 @@ mod fast_path {
                     coefficient_idx: coefficient_base + x,
                     stride,
                 };
-                magnitude_refinement_coefficient(state, decoder, column, &mut flags, 0);
-                magnitude_refinement_coefficient(state, decoder, column, &mut flags, 1);
-                magnitude_refinement_coefficient(state, decoder, column, &mut flags, 2);
-                magnitude_refinement_coefficient(state, decoder, column, &mut flags, 3);
+                magnitude_refinement_coefficient(state, &mut dec, column, &mut flags, 0);
+                magnitude_refinement_coefficient(state, &mut dec, column, &mut flags, 1);
+                magnitude_refinement_coefficient(state, &mut dec, column, &mut flags, 2);
+                magnitude_refinement_coefficient(state, &mut dec, column, &mut flags, 3);
 
                 if flags != orig_flags {
                     state.stripe_flags[flag_idx] = flags;
@@ -1472,6 +1479,8 @@ mod fast_path {
             flag_base += stride;
             coefficient_base += 4 * stride;
         }
+
+        *decoder = dec;
     }
 
     #[inline(always)]
