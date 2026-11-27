@@ -1,4 +1,4 @@
-Benchmark codestreams. `decode::discard` decodes every fixture at discard levels 0, 1, 2 and 5. `decode::partial` decodes the first 600, 2000 and 8192 bytes of `plywood.j2c`, `rgb-1024-rlcp.j2c` and `rgba-1024-lrcp.j2c` at discard level 2, as a viewer does while a fetch is still arriving. `decode::reused` decodes every fixture at discard levels 0 and 2 with one `DecoderContext` kept across runs. `header::parse` and `header::inspect` read every fixture's header without decoding it.
+Benchmark codestreams. `decode::discard` decodes every fixture at discard levels 0, 1, 2 and 5. `decode::partial` decodes the first 600, 2000 and 8192 bytes of `plywood.j2c`, `rgb-1024-rlcp.j2c` and `rgba-1024-lrcp.j2c` at discard level 2, as a viewer does while a fetch is still arriving. `header::parse` and `header::inspect` read every fixture's header without decoding it.
 
 ## Second Life defaults
 
