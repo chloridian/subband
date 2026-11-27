@@ -8,7 +8,7 @@ use super::codestream::{ComponentInfo, WaveletTransform};
 use super::decode::{DecodeParams, DecompositionStorage, decode_sub_band_strip};
 use super::mct;
 use super::rect::IntRect;
-use crate::cancel::Cancel;
+use crate::check_cancelled;
 use crate::error::{DecodeError, Result};
 use crate::j2c::Header;
 use crate::math::{self, Level, SIMD_WIDTH, Simd, dispatch, f32x8};
@@ -50,7 +50,7 @@ impl ComponentStage {
         high_row: &mut Vec<f32>,
         bit_plane_ctx: &mut BitPlaneDecodeContext,
         bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-        cancel: Cancel<'_>,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<()> {
         match self {
             Self::Direct(stage) => stage.advance_to(
@@ -62,7 +62,7 @@ impl ComponentStage {
                 max_layers,
                 bit_plane_ctx,
                 bit_plane_buffers,
-                cancel,
+                cancelled,
             ),
             Self::LastDwt(stage) => stage.advance_to(
                 simd,
@@ -76,7 +76,7 @@ impl ComponentStage {
                 high_row,
                 bit_plane_ctx,
                 bit_plane_buffers,
-                cancel,
+                cancelled,
             ),
         }
     }
@@ -112,7 +112,7 @@ impl DirectStage {
         max_layers: Option<u8>,
         bit_plane_ctx: &mut BitPlaneDecodeContext,
         bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-        cancel: Cancel<'_>,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<()> {
         let abs_y = self.y0 + y as u32;
         if abs_y < self.strip_y1 && abs_y >= self.strip_y0 {
@@ -133,7 +133,7 @@ impl DirectStage {
             abs_y,
             abs_y_end,
             &mut self.strip,
-            cancel,
+            cancelled,
         )?;
         self.strip_y0 = abs_y;
         self.strip_y1 = abs_y_end;
@@ -208,7 +208,7 @@ impl LastStage {
         high_row: &mut Vec<f32>,
         bit_plane_ctx: &mut BitPlaneDecodeContext,
         bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-        cancel: Cancel<'_>,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<()> {
         let is_low_row = row_idx.is_multiple_of(2) == self.low_first_y;
         let v = row_idx / 2;
@@ -230,7 +230,7 @@ impl LastStage {
                     abs_y,
                     abs_y_end,
                     &mut self.hl_strip,
-                    cancel,
+                    cancelled,
                 )?;
                 self.hl_strip_y0 = abs_y;
                 self.hl_strip_y1 = abs_y_end;
@@ -273,7 +273,7 @@ impl LastStage {
                     abs_y,
                     abs_y_end,
                     &mut self.lh_strip,
-                    cancel,
+                    cancelled,
                 )?;
                 decode_sub_band_strip(
                     codestream,
@@ -288,7 +288,7 @@ impl LastStage {
                     abs_y,
                     abs_y_end,
                     &mut self.hh_strip,
-                    cancel,
+                    cancelled,
                 )?;
                 self.lh_strip_y0 = abs_y;
                 self.lh_strip_y1 = abs_y_end;
@@ -331,7 +331,7 @@ impl LastStage {
         high_row: &mut Vec<f32>,
         bit_plane_ctx: &mut BitPlaneDecodeContext,
         bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-        cancel: Cancel<'_>,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<()> {
         let width = self.rect.width() as usize;
         let slot = row_idx & (RING - 1);
@@ -352,7 +352,7 @@ impl LastStage {
             high_row,
             bit_plane_ctx,
             bit_plane_buffers,
-            cancel,
+            cancelled,
         )
     }
 
@@ -370,7 +370,7 @@ impl LastStage {
         high_row: &mut Vec<f32>,
         bit_plane_ctx: &mut BitPlaneDecodeContext,
         bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-        cancel: Cancel<'_>,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<()> {
         let width = self.rect.width() as usize;
         let height = self.rect.height() as usize;
@@ -415,10 +415,10 @@ impl LastStage {
                         high_row,
                         bit_plane_ctx,
                         bit_plane_buffers,
-                        cancel,
+                        cancelled,
                     )?;
                 }
-                filter_vertical(simd, buf, width, self.rect, self.transform, cancel)?;
+                filter_vertical(simd, buf, width, self.rect, self.transform, cancelled)?;
                 *computed = true;
                 Ok(())
             }
@@ -455,7 +455,7 @@ impl LastStage {
                                 high_row,
                                 bit_plane_ctx,
                                 bit_plane_buffers,
-                                cancel,
+                                cancelled,
                             )?;
                             self.load_into_ring::<S, 4>(
                                 simd,
@@ -470,7 +470,7 @@ impl LastStage {
                                 high_row,
                                 bit_plane_ctx,
                                 bit_plane_buffers,
-                                cancel,
+                                cancelled,
                             )?;
                             lift_ring_row::<S, 4>(
                                 simd,
@@ -498,7 +498,7 @@ impl LastStage {
                                 high_row,
                                 bit_plane_ctx,
                                 bit_plane_buffers,
-                                cancel,
+                                cancelled,
                             )?;
                             if even + 1 < height {
                                 self.load_into_ring::<S, 4>(
@@ -514,7 +514,7 @@ impl LastStage {
                                     high_row,
                                     bit_plane_ctx,
                                     bit_plane_buffers,
-                                    cancel,
+                                    cancelled,
                                 )?;
                             }
                             let below = if even + 1 < height {
@@ -575,7 +575,7 @@ impl LastStage {
                                 high_row,
                                 bit_plane_ctx,
                                 bit_plane_buffers,
-                                cancel,
+                                cancelled,
                             )?;
                         }
                         lift_ring_row::<S, 4>(
@@ -615,7 +615,7 @@ impl LastStage {
                             high_row,
                             bit_plane_ctx,
                             bit_plane_buffers,
-                            cancel,
+                            cancelled,
                         )?;
                         if odd + 1 < height {
                             self.load_into_ring::<S, 4>(
@@ -631,7 +631,7 @@ impl LastStage {
                                 high_row,
                                 bit_plane_ctx,
                                 bit_plane_buffers,
-                                cancel,
+                                cancelled,
                             )?;
                         }
                         let below = if odd + 1 < height { odd + 1 } else { odd - 1 };
@@ -716,7 +716,7 @@ impl LastStage {
                                 high_row,
                                 bit_plane_ctx,
                                 bit_plane_buffers,
-                                cancel,
+                                cancelled,
                             )?;
                             scale_ring_row::<S, 8>(simd, ring, width, even, KAPPA)?;
                             if even + 1 < height {
@@ -733,7 +733,7 @@ impl LastStage {
                                     high_row,
                                     bit_plane_ctx,
                                     bit_plane_buffers,
-                                    cancel,
+                                    cancelled,
                                 )?;
                                 scale_ring_row::<S, 8>(simd, ring, width, even + 1, INV_KAPPA)?;
                             }
@@ -878,7 +878,7 @@ impl LastStage {
                                 high_row,
                                 bit_plane_ctx,
                                 bit_plane_buffers,
-                                cancel,
+                                cancelled,
                             )?;
                         }
                         scale_ring_row::<S, 8>(simd, ring, width, 0, INV_KAPPA)?;
@@ -920,7 +920,7 @@ impl LastStage {
                             high_row,
                             bit_plane_ctx,
                             bit_plane_buffers,
-                            cancel,
+                            cancelled,
                         )?;
                         scale_ring_row::<S, 8>(simd, ring, width, odd, KAPPA)?;
                         if odd + 1 < height {
@@ -937,7 +937,7 @@ impl LastStage {
                                 high_row,
                                 bit_plane_ctx,
                                 bit_plane_buffers,
-                                cancel,
+                                cancelled,
                             )?;
                             scale_ring_row::<S, 8>(simd, ring, width, odd + 1, INV_KAPPA)?;
                         }
@@ -1177,10 +1177,10 @@ impl<'a> HorizontalFilter<'a> {
         dst_stride: usize,
         start_row: usize,
         strip_h: usize,
-        cancel: Cancel<'_>,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<()> {
         for v in 0..strip_h {
-            cancel.check()?;
+            check_cancelled(cancelled)?;
 
             let row = coefficients
                 .get_mut((start_row + v * 2) * dst_stride..)
@@ -1255,7 +1255,7 @@ impl<S: Simd> Lifting<S> for HorizontalFilter<'_> {
 }
 
 struct VerticalFilter<'a> {
-    cancel: Cancel<'a>,
+    cancelled: &'a dyn Fn() -> bool,
     coefficients: &'a mut [f32],
     width: usize,
     stride: usize,
@@ -1267,7 +1267,7 @@ impl VerticalFilter<'_> {
     #[inline(always)]
     fn scale_rows<S: Simd>(&mut self, simd: S, first_row: usize, factor: f32) -> Result<()> {
         for row in (first_row..self.height).step_by(2) {
-            self.cancel.check()?;
+            check_cancelled(self.cancelled)?;
             scale_row(
                 simd,
                 self.coefficients,
@@ -1294,7 +1294,7 @@ impl VerticalFilter<'_> {
         let height = self.height;
 
         for row in (first_row..height).step_by(2) {
-            self.cancel.check()?;
+            check_cancelled(self.cancelled)?;
 
             let above = if row == 0 { 1 } else { row - 1 };
             let below = if row == height - 1 {
@@ -1390,7 +1390,7 @@ pub(crate) fn apply_tile(
     header: &Header,
     params: DecodeParams,
     out: &mut [u8],
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let width = tile_rect.width() as usize;
     let height = tile_rect.height() as usize;
@@ -1414,7 +1414,7 @@ pub(crate) fn apply_tile(
     let mut stages = Vec::with_capacity(num_components);
 
     for (idx, component_info) in component_infos.iter().enumerate() {
-        cancel.check()?;
+        check_cancelled(cancelled)?;
         let stage = prepare_component_stage(
             codestream,
             storage,
@@ -1425,7 +1425,7 @@ pub(crate) fn apply_tile(
             component_info,
             header,
             params,
-            cancel,
+            cancelled,
         )?;
         stages.push(stage);
     }
@@ -1439,7 +1439,7 @@ pub(crate) fn apply_tile(
 
     dispatch!(Level::new(), simd => {
         for y in 0..height {
-            cancel.check()?;
+            check_cancelled(cancelled)?;
             for (stage, component_info) in stages.iter_mut().zip(component_infos) {
                 stage.advance_to(
                     simd,
@@ -1453,7 +1453,7 @@ pub(crate) fn apply_tile(
                     &mut high_row,
                     bit_plane_ctx,
                     bit_plane_buffers,
-                    cancel,
+                    cancelled,
                 )?;
             }
 
@@ -1496,7 +1496,7 @@ fn prepare_component_stage(
     component_info: &ComponentInfo,
     header: &Header,
     params: DecodeParams,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<ComponentStage> {
     let tile_decompositions = storage
         .tile_decompositions
@@ -1585,12 +1585,12 @@ fn prepare_component_stage(
             ll_sub_band.rect.y0,
             ll_sub_band.rect.y1,
             &mut scratch.strip_b,
-            cancel,
+            cancelled,
         )?;
 
         if middle.is_empty() {
             let len = buffer_size(first);
-            cancel.ensure_len(&mut ll_plane, len)?;
+            ensure_len(&mut ll_plane, len, cancelled)?;
             filter_2d_first(
                 codestream,
                 &mut ll_plane,
@@ -1607,7 +1607,7 @@ fn prepare_component_stage(
                 storage,
                 header,
                 params.max_layers,
-                cancel,
+                cancelled,
             )?;
         } else {
             let (last_mid, earlier_mid) = middle.split_last().ok_or(DecodeError::Malformed)?;
@@ -1616,7 +1616,7 @@ fn prepare_component_stage(
             let first_width = first.rect.width() as usize;
 
             if use_buffer {
-                cancel.ensure_len(&mut scratch.buffer, first_len)?;
+                ensure_len(&mut scratch.buffer, first_len, cancelled)?;
                 let dst = scratch
                     .buffer
                     .get_mut(..first_len)
@@ -1637,10 +1637,10 @@ fn prepare_component_stage(
                     storage,
                     header,
                     params.max_layers,
-                    cancel,
+                    cancelled,
                 )?;
             } else {
-                cancel.ensure_len(&mut scratch.aux_buffer, first_len)?;
+                ensure_len(&mut scratch.aux_buffer, first_len, cancelled)?;
                 let dst = scratch
                     .aux_buffer
                     .get_mut(..first_len)
@@ -1661,7 +1661,7 @@ fn prepare_component_stage(
                     storage,
                     header,
                     params.max_layers,
-                    cancel,
+                    cancelled,
                 )?;
             }
 
@@ -1671,7 +1671,7 @@ fn prepare_component_stage(
                 let len = buffer_size(decomposition);
                 let width = decomposition.rect.width() as usize;
                 if use_buffer {
-                    cancel.ensure_len(&mut scratch.buffer, len)?;
+                    ensure_len(&mut scratch.buffer, len, cancelled)?;
                     let dst = scratch
                         .buffer
                         .get_mut(..len)
@@ -1693,10 +1693,10 @@ fn prepare_component_stage(
                         storage,
                         header,
                         params.max_layers,
-                        cancel,
+                        cancelled,
                     )?;
                 } else {
-                    cancel.ensure_len(&mut scratch.aux_buffer, len)?;
+                    ensure_len(&mut scratch.aux_buffer, len, cancelled)?;
                     let dst = scratch
                         .aux_buffer
                         .get_mut(..len)
@@ -1718,14 +1718,14 @@ fn prepare_component_stage(
                         storage,
                         header,
                         params.max_layers,
-                        cancel,
+                        cancelled,
                     )?;
                 }
             }
 
             let last_mid_res = (earlier_mid.len() + 2) as u8;
             let last_mid_len = buffer_size(last_mid);
-            cancel.ensure_len(&mut ll_plane, last_mid_len)?;
+            ensure_len(&mut ll_plane, last_mid_len, cancelled)?;
             let src = if use_buffer {
                 &scratch.buffer
             } else {
@@ -1748,7 +1748,7 @@ fn prepare_component_stage(
                 storage,
                 header,
                 params.max_layers,
-                cancel,
+                cancelled,
             )?;
         }
     } else {
@@ -1765,7 +1765,7 @@ fn prepare_component_stage(
             ll_sub_band.rect.y0,
             ll_sub_band.rect.y1,
             &mut ll_plane,
-            cancel,
+            cancelled,
         )?;
     }
 
@@ -1847,7 +1847,7 @@ fn filter_2d_first(
     storage: &DecompositionStorage,
     header: &Header,
     max_layers: Option<u8>,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let width = decomposition.rect.width() as usize;
     let height = decomposition.rect.height() as usize;
@@ -1891,7 +1891,7 @@ fn filter_2d_first(
             num_low,
             num_high,
             transform,
-            cancel,
+            cancelled,
         )?;
         filter_high_rows_streaming(
             simd,
@@ -1917,7 +1917,7 @@ fn filter_2d_first(
             num_low,
             num_high,
             transform,
-            cancel,
+            cancelled,
         )?;
         filter_vertical(
             simd,
@@ -1925,7 +1925,7 @@ fn filter_2d_first(
             dst_stride,
             decomposition.rect,
             transform,
-            cancel,
+            cancelled,
         )
     })
 }
@@ -1947,7 +1947,7 @@ fn filter_2d(
     storage: &DecompositionStorage,
     header: &Header,
     max_layers: Option<u8>,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let width = decomposition.rect.width() as usize;
     let height = decomposition.rect.height() as usize;
@@ -1991,7 +1991,7 @@ fn filter_2d(
             num_low,
             num_high,
             transform,
-            cancel,
+            cancelled,
         )?;
         filter_high_rows_streaming(
             simd,
@@ -2017,7 +2017,7 @@ fn filter_2d(
             num_low,
             num_high,
             transform,
-            cancel,
+            cancelled,
         )?;
         filter_vertical(
             simd,
@@ -2025,7 +2025,7 @@ fn filter_2d(
             dst_stride,
             decomposition.rect,
             transform,
-            cancel,
+            cancelled,
         )
     })
 }
@@ -2054,7 +2054,7 @@ fn filter_low_rows_streaming<S: Simd>(
     num_low: usize,
     num_high: usize,
     transform: WaveletTransform,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let hl_sb = storage
         .sub_bands
@@ -2086,7 +2086,7 @@ fn filter_low_rows_streaming<S: Simd>(
             abs_y,
             abs_y_end,
             hl_strip,
-            cancel,
+            cancelled,
         )?;
 
         let ll_start = v_start.checked_mul(num_low).ok_or(DecodeError::Malformed)?;
@@ -2105,7 +2105,7 @@ fn filter_low_rows_streaming<S: Simd>(
             dst_stride,
             first_row + v_start * 2,
             strip_h,
-            cancel,
+            cancelled,
         )?;
 
         abs_y = abs_y_end;
@@ -2139,7 +2139,7 @@ fn filter_high_rows_streaming<S: Simd>(
     num_low: usize,
     num_high: usize,
     transform: WaveletTransform,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let lh_sb = storage
         .sub_bands
@@ -2171,7 +2171,7 @@ fn filter_high_rows_streaming<S: Simd>(
             abs_y,
             abs_y_end,
             lh_strip,
-            cancel,
+            cancelled,
         )?;
         decode_sub_band_strip(
             codestream,
@@ -2186,7 +2186,7 @@ fn filter_high_rows_streaming<S: Simd>(
             abs_y,
             abs_y_end,
             hh_strip,
-            cancel,
+            cancelled,
         )?;
 
         filter.filter_rows(
@@ -2198,7 +2198,7 @@ fn filter_high_rows_streaming<S: Simd>(
             dst_stride,
             first_row + v_start * 2,
             strip_h,
-            cancel,
+            cancelled,
         )?;
 
         abs_y = abs_y_end;
@@ -2280,7 +2280,7 @@ fn filter_vertical<S: Simd>(
     stride: usize,
     rect: IntRect,
     transform: WaveletTransform,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let width = rect.width() as usize;
     let height = rect.height() as usize;
@@ -2295,7 +2295,7 @@ fn filter_vertical<S: Simd>(
                     width,
                     stride,
                     height,
-                    cancel,
+                    cancelled,
                 );
             }
             WaveletTransform::Irreversible97 if height >= 8 => {
@@ -2305,7 +2305,7 @@ fn filter_vertical<S: Simd>(
                     width,
                     stride,
                     height,
-                    cancel,
+                    cancelled,
                 );
             }
             _ => {}
@@ -2313,7 +2313,7 @@ fn filter_vertical<S: Simd>(
     }
 
     let mut filter = VerticalFilter {
-        cancel,
+        cancelled,
         coefficients,
         width,
         stride,
@@ -2422,7 +2422,7 @@ fn filter_vertical_53r_fused<S: Simd>(
     width: usize,
     stride: usize,
     height: usize,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let lift_low_simd =
         |s: f32x8<S>, left: f32x8<S>, right: f32x8<S>| s - ((left + right + 2.0) * 0.25).floor();
@@ -2445,7 +2445,7 @@ fn filter_vertical_53r_fused<S: Simd>(
     )?;
 
     for even in (2..height).step_by(2) {
-        cancel.check()?;
+        check_cancelled(cancelled)?;
         let below = if even + 1 < height {
             even + 1
         } else {
@@ -2500,7 +2500,7 @@ fn filter_vertical_97i_fused<S: Simd>(
     width: usize,
     stride: usize,
     height: usize,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let neg_alpha = f32x8::splat(simd, NEG_ALPHA);
     let neg_beta = f32x8::splat(simd, NEG_BETA);
@@ -2517,7 +2517,7 @@ fn filter_vertical_97i_fused<S: Simd>(
     let alpha_scalar = |s: f32, l: f32, r: f32| math::mul_add(l + r, NEG_ALPHA, s);
 
     for even in (0..height).step_by(2) {
-        cancel.check()?;
+        check_cancelled(cancelled)?;
         scale_row(simd, coefficients, width, stride, even, KAPPA)?;
         if even + 1 < height {
             scale_row(simd, coefficients, width, stride, even + 1, INV_KAPPA)?;
@@ -2778,4 +2778,12 @@ fn scale<S: Simd>(simd: S, samples: &mut [f32], factor: f32) {
     for sample in rest {
         *sample *= factor;
     }
+}
+
+fn ensure_len(buf: &mut Vec<f32>, len: usize, cancelled: &dyn Fn() -> bool) -> Result<()> {
+    if buf.len() < len {
+        check_cancelled(cancelled)?;
+        buf.resize(len, 0.0);
+    }
+    Ok(())
 }

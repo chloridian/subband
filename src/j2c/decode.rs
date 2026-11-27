@@ -11,12 +11,11 @@ use super::rect::IntRect;
 use super::tag_tree::TagNode;
 use super::tile::{ComponentTile, ResolutionTile, Tile};
 use super::{bitplane, build, idwt, mct, segment, tile};
-use crate::Decoded;
-use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result, bail};
 use crate::j2c::segment::MAX_BITPLANE_COUNT;
 use crate::math;
 use crate::reader::BitReader;
+use crate::{Decoded, check_cancelled};
 
 #[derive(Clone, Copy)]
 pub(crate) struct DecodeParams {
@@ -116,9 +115,9 @@ pub(crate) fn decode(
     header: &Header,
     params: DecodeParams,
     out: &mut [u8],
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Decoded> {
-    cancel.check()?;
+    check_cancelled(cancelled)?;
 
     let mut reader = BitReader::new(data);
     let mut tiles = Vec::new();
@@ -143,7 +142,7 @@ pub(crate) fn decode(
 
     let tiles = tiles.get(..tile_count).ok_or(DecodeError::Malformed)?;
     for tile in tiles {
-        cancel.check()?;
+        check_cancelled(cancelled)?;
 
         let component_infos = tile.component_infos(header);
         let tile_mct = mct::tile_mct(tile.mct, component_infos, header.strict)?;
@@ -162,7 +161,7 @@ pub(crate) fn decode(
                 num_components,
                 tile_rect,
                 128,
-                cancel,
+                cancelled,
             )?;
             continue;
         }
@@ -179,7 +178,7 @@ pub(crate) fn decode(
             header,
             &mut storage,
             params.skipped_resolution_levels,
-            cancel,
+            cancelled,
         )?;
         segment::parse(
             data,
@@ -190,7 +189,7 @@ pub(crate) fn decode(
             &mut storage,
             &mut received_packets,
             decoded_resolutions,
-            cancel,
+            cancelled,
         )?;
 
         idwt::apply_tile(
@@ -204,7 +203,7 @@ pub(crate) fn decode(
             header,
             params,
             out,
-            cancel,
+            cancelled,
         )?;
 
         update_layers_received(
@@ -233,7 +232,7 @@ fn fill_tile_rect(
     num_components: usize,
     rect: IntRect,
     value: u8,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let width = rect.width() as usize;
     let height = rect.height() as usize;
@@ -246,7 +245,7 @@ fn fill_tile_rect(
         .checked_mul(num_components)
         .ok_or(DecodeError::Malformed)?;
     for y in 0..height {
-        cancel.check()?;
+        check_cancelled(cancelled)?;
         let start = (y0 + y)
             .checked_mul(image_width)
             .and_then(|r| r.checked_add(x0))
@@ -312,55 +311,7 @@ pub(crate) fn decode_sub_band_strip(
     abs_y0: u32,
     abs_y1: u32,
     dst: &mut Vec<f32>,
-    cancel: Cancel<'_>,
-) -> Result<()> {
-    let sub_band = storage
-        .sub_bands
-        .get(sub_band_idx)
-        .ok_or(DecodeError::Malformed)?;
-
-    let sb_width = sub_band.rect.width() as usize;
-    let strip_height = abs_y1.saturating_sub(abs_y0) as usize;
-    let strip_len = sb_width
-        .checked_mul(strip_height)
-        .ok_or(DecodeError::TooLarge)?;
-    cancel.ensure_len(dst, strip_len)?;
-
-    decode_sub_band_strip_into(
-        codestream,
-        sub_band_idx,
-        resolution,
-        component_info,
-        bit_plane_ctx,
-        bit_plane_buffers,
-        storage,
-        header,
-        max_layers,
-        abs_y0,
-        abs_y1,
-        dst,
-        0,
-        sb_width,
-        cancel,
-    )
-}
-
-pub(crate) fn decode_sub_band_strip_into(
-    codestream: &[u8],
-    sub_band_idx: usize,
-    resolution: u8,
-    component_info: &ComponentInfo,
-    bit_plane_ctx: &mut BitPlaneDecodeContext,
-    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
-    storage: &DecompositionStorage,
-    header: &Header,
-    max_layers: Option<u8>,
-    abs_y0: u32,
-    abs_y1: u32,
-    dst: &mut [f32],
-    dst_base: usize,
-    dst_stride: usize,
-    cancel: Cancel<'_>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<()> {
     let sub_band = storage
         .sub_bands
@@ -371,6 +322,14 @@ pub(crate) fn decode_sub_band_strip_into(
     let strip_height = abs_y1.saturating_sub(abs_y0) as usize;
     if sb_width == 0 || strip_height == 0 {
         return Ok(());
+    }
+
+    let strip_len = sb_width
+        .checked_mul(strip_height)
+        .ok_or(DecodeError::TooLarge)?;
+    if dst.len() < strip_len {
+        check_cancelled(cancelled)?;
+        dst.resize(strip_len, 0.0);
     }
 
     let quantised =
@@ -444,11 +403,11 @@ pub(crate) fn decode_sub_band_strip_into(
                 continue;
             }
 
-            cancel.check()?;
+            check_cancelled(cancelled)?;
 
             let x_offset = code_block.rect.x0 - sub_band.rect.x0;
             let y_offset = code_block.rect.y0 - abs_y0;
-            let mut base_idx = dst_base + (y_offset as usize) * dst_stride + x_offset as usize;
+            let mut base_idx = (y_offset as usize) * sb_width + x_offset as usize;
 
             if !bitplane::decode(
                 codestream,
@@ -470,7 +429,7 @@ pub(crate) fn decode_sub_band_strip_into(
                         .and_then(|r| r.get_mut(..cb_w))
                         .ok_or(DecodeError::Malformed)?;
                     out_row.fill(0.0);
-                    base_idx += dst_stride;
+                    base_idx += sb_width;
                 }
                 continue;
             }
@@ -478,7 +437,7 @@ pub(crate) fn decode_sub_band_strip_into(
             bit_plane_ctx.write_reconstructed(
                 dst,
                 base_idx,
-                dst_stride,
+                sb_width,
                 irreversible,
                 component_info.roi_shift,
                 dequantization_step,

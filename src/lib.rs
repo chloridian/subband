@@ -1,14 +1,12 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
-mod cancel;
 mod error;
 mod j2c;
 mod jp2;
 pub(crate) mod math;
 pub(crate) mod reader;
 
-use crate::cancel::Cancel;
 pub use crate::error::{DecodeError, Result};
 pub use crate::j2c::Inspection;
 use crate::j2c::{DecodeParams, Header, MAX_RESOLUTIONS};
@@ -184,8 +182,15 @@ impl<'a> Image<'a> {
             width,
             height,
         };
-        let cancel = Cancel(&cancelled);
-        j2c::decode(self.codestream, &self.header, params, out, cancel)
+        j2c::decode(self.codestream, &self.header, params, out, &cancelled)
+    }
+}
+
+pub(crate) fn check_cancelled(cancelled: &dyn Fn() -> bool) -> Result<()> {
+    if cancelled() {
+        Err(DecodeError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
