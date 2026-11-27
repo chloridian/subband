@@ -1,3 +1,8 @@
+const STATE_MASK: u8 = 0x3F;
+const QE_TABLE_LEN: usize = STATE_MASK as usize + 1;
+
+static QE_TABLE: [QeData; QE_TABLE_LEN] = padded(QE_STATES);
+
 pub(crate) struct ArithmeticDecoder<'a> {
     data: &'a [u8],
     c: u32,
@@ -111,7 +116,7 @@ pub(crate) struct ArithmeticDecoderContext(u8);
 impl ArithmeticDecoderContext {
     #[inline(always)]
     pub(crate) fn index(self) -> u32 {
-        (self.0 & 0x3F) as u32
+        (self.0 & STATE_MASK) as u32
     }
 
     #[inline(always)]
@@ -164,7 +169,7 @@ macro_rules! qe {
 }
 
 #[rustfmt::skip]
-static QE_TABLE: [QeData; 64] = qe!(
+const QE_STATES: [QeData; 47] = qe!(
     0x5601, 1, 1, true,
     0x3401, 2, 6, false,
     0x1801, 3, 9, false,
@@ -212,21 +217,15 @@ static QE_TABLE: [QeData; 64] = qe!(
     0x0005, 45, 42, false,
     0x0001, 45, 43, false,
     0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
-    0x5601, 46, 46, false,
 );
+
+#[expect(clippy::indexing_slicing)]
+const fn padded(states: [QeData; 47]) -> [QeData; QE_TABLE_LEN] {
+    let mut table = [states[46]; QE_TABLE_LEN];
+    let mut i = 0;
+    while i < states.len() {
+        table[i] = states[i];
+        i += 1;
+    }
+    table
+}
