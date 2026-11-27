@@ -1,6 +1,4 @@
-use std::vec::Vec;
-
-use crate::cancel::Cancel;
+use crate::cancel::CancelHandle;
 use crate::error::{DecodeError, Result, bail};
 use crate::j2c::{self, ComponentData};
 use crate::jp2::r#box::{FILE_TYPE, JP2_SIGNATURE};
@@ -12,9 +10,9 @@ pub(crate) mod r#box;
 const MAX_BOXES_PER_LEVEL: usize = 64;
 
 pub struct DecodedImage<'a> {
-    pub(crate) decoded_components: &'a mut Vec<ComponentData>,
+    pub(crate) decoded_components: &'a [ComponentData],
     pub(crate) layers_received: &'a [u8],
-    pub(crate) cancel: Cancel<'a>,
+    pub(crate) cancel: Option<CancelHandle>,
 }
 
 pub(crate) fn parse<'a>(data: &'a [u8], settings: DecodeSettings) -> Result<Image<'a>> {

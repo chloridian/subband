@@ -1,6 +1,8 @@
 use core::ops::{Deref, DerefMut};
-use std::vec;
 use std::vec::Vec;
+
+use crate::cancel::Cancel;
+use crate::error::Result;
 
 pub(crate) const SIMD_WIDTH: usize = 8;
 
@@ -536,21 +538,32 @@ pub(crate) fn pow2i(exp: i32) -> f32 {
 
 pub(crate) use inner::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct SimdBuffer<const N: usize> {
     data: Vec<f32>,
     original_len: usize,
 }
 
 impl<const N: usize> SimdBuffer<N> {
-    pub(crate) fn zeros(original_len: usize) -> Self {
+    pub(crate) fn resize_zero(&mut self, original_len: usize, cancel: Cancel<'_>) -> Result<()> {
         let padded_len = Self::padded_len(original_len);
-        let data = vec![0.0; padded_len];
-        Self { data, original_len }
+        self.data.clear();
+        cancel.resize(&mut self.data, padded_len)?;
+        self.original_len = original_len;
+        Ok(())
     }
 
     pub(crate) fn truncated(&self) -> &[f32] {
         self.data.get(..self.original_len).unwrap_or(&self.data)
+    }
+
+    pub(crate) fn as_vec_mut(&mut self) -> &mut Vec<f32> {
+        &mut self.data
+    }
+
+    pub(crate) fn restore_padding(&mut self) {
+        let padded_len = Self::padded_len(self.original_len);
+        self.data.resize(padded_len, 0.0);
     }
 
     fn padded_len(original_len: usize) -> usize {

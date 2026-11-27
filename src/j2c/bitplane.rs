@@ -4,34 +4,31 @@ use std::vec::Vec;
 use super::arithmetic_decoder::{ArithmeticDecoder, ArithmeticDecoderContext};
 use super::build::{CodeBlock, SubBandType};
 use super::codestream::CodeBlockStyle;
-use super::decode::{DecompositionStorage, TileDecodeContext};
+use super::decode::DecompositionStorage;
 use crate::error::{DecodeError, Result, bail};
 use crate::reader::BitReader;
 
 pub(crate) fn decode(
+    codestream: &[u8],
     code_block: &CodeBlock,
     sub_band_type: SubBandType,
     total_bitplanes: u8,
     style: &CodeBlockStyle,
-    tile_ctx: &mut TileDecodeContext,
-    storage: &DecompositionStorage<'_>,
+    bit_plane_ctx: &mut BitPlaneDecodeContext,
+    bit_plane_buffers: &mut BitPlaneDecodeBuffers,
+    storage: &DecompositionStorage,
     max_layers: Option<u8>,
     strict: bool,
 ) -> Result<()> {
-    tile_ctx.bit_plane_decode_context.reset(
-        code_block,
-        sub_band_type,
-        style,
-        total_bitplanes,
-        strict,
-    )?;
-    tile_ctx.bit_plane_decode_buffers.reset();
+    bit_plane_ctx.reset(code_block, sub_band_type, style, total_bitplanes, strict)?;
+    bit_plane_buffers.reset();
 
     decode_inner(
+        codestream,
         code_block,
         storage,
-        &mut tile_ctx.bit_plane_decode_context,
-        &mut tile_ctx.bit_plane_decode_buffers,
+        bit_plane_ctx,
+        bit_plane_buffers,
         max_layers,
     )
     .ok_or(DecodeError::Malformed)?;
@@ -40,8 +37,9 @@ pub(crate) fn decode(
 }
 
 fn decode_inner(
+    codestream: &[u8],
     code_block: &CodeBlock,
-    storage: &DecompositionStorage<'_>,
+    storage: &DecompositionStorage,
     ctx: &mut BitPlaneDecodeContext,
     bp_buffers: &mut BitPlaneDecodeBuffers,
     max_layers: Option<u8>,
@@ -54,11 +52,11 @@ fn decode_inner(
 
     for layer in storage
         .layers
-        .get(code_block.layers.clone())?
+        .get(code_block.layers_range())?
         .iter()
         .take(layer_limit)
     {
-        if let Some(range) = layer.segments.clone() {
+        if let Some(range) = layer.segments() {
             let layer_segments = storage.segments.get(range)?;
             for segment in layer_segments {
                 if segment.idx != last_segment_idx {
@@ -71,7 +69,11 @@ fn decode_inner(
                     last_segment_idx += 1;
                 }
 
-                bp_buffers.combined_layers.extend(segment.data);
+                let end = segment
+                    .data_start
+                    .checked_add(segment.data_length as usize)?;
+                let bytes = codestream.get(segment.data_start..end)?;
+                bp_buffers.combined_layers.extend_from_slice(bytes);
                 coding_passes += segment.coding_pases;
             }
         }

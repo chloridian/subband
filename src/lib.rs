@@ -99,17 +99,19 @@ impl<'a> Image<'a> {
         self.header.global_coding_style.num_layers
     }
 
-    pub fn decode<'b>(
-        &'a self,
-        decoder_context: &'b mut DecoderContext<'a>,
-    ) -> Result<DecodedImage<'b>> {
+    pub fn decode<'b>(&self, decoder_context: &'b mut DecoderContext) -> Result<DecodedImage<'b>> {
         let settings = &self.settings;
         let cancel = Cancel(settings.cancel.as_ref());
         j2c::decode(self.codestream, &self.header, decoder_context, cancel)?;
+        let num_components = self.header.component_infos.len();
+        let decoded_components = decoder_context
+            .channel_data
+            .get(..num_components)
+            .ok_or(DecodeError::Malformed)?;
         Ok(DecodedImage {
-            decoded_components: &mut decoder_context.channel_data,
+            decoded_components,
             layers_received: &decoder_context.layers_received,
-            cancel,
+            cancel: settings.cancel.clone(),
         })
     }
 }
@@ -160,8 +162,8 @@ pub fn inspect(data: &[u8], settings: &DecodeSettings) -> Result<Inspection> {
 }
 
 fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) -> Result<()> {
-    let cancel = image.cancel;
-    let components = &*image.decoded_components;
+    let cancel = Cancel(image.cancel.as_ref());
+    let components = image.decoded_components;
     let Some(first) = components.first() else {
         return Ok(());
     };
@@ -176,7 +178,7 @@ fn interleave_and_convert(image: &DecodedImage<'_>, buf: &mut [u8]) -> Result<()
         let Some(out) = buf.get_mut(start * num_components..end * num_components) else {
             break;
         };
-        match components.as_slice() {
+        match components {
             [c0] => {
                 if let Some(p0) = c0.container.get(start..end) {
                     interleave_to_u8([p0], out);

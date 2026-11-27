@@ -1,3 +1,4 @@
+use core::ops::Range;
 use std::vec;
 use std::vec::Vec;
 
@@ -14,9 +15,50 @@ use crate::reader::BitReader;
 pub(crate) const MAX_TILE_PARTS_PER_TILE: usize = 1024;
 
 #[derive(Clone, Debug)]
-pub(crate) struct Tile<'a> {
-    pub(crate) tile_parts: Vec<TilePart<'a>>,
-    pub(crate) component_infos: Vec<ComponentInfo>,
+pub(crate) struct TilePartData {
+    pub(crate) body: Range<usize>,
+    pub(crate) ppt_headers: Vec<Range<usize>>,
+    pub(crate) ppm_idx: Option<usize>,
+}
+
+impl TilePartData {
+    pub(crate) fn to_tile_part<'a>(
+        &self,
+        codestream: &'a [u8],
+        header: &'a Header,
+    ) -> Option<TilePart<'a>> {
+        let body_bytes = codestream.get(self.body.clone())?;
+        if self.ppt_headers.is_empty() && self.ppm_idx.is_none() {
+            return Some(TilePart::Merged(MergedTilePart {
+                data: BitReader::new(body_bytes),
+                body_offset: self.body.start,
+            }));
+        }
+
+        let mut headers =
+            Vec::with_capacity(self.ppt_headers.len() + usize::from(self.ppm_idx.is_some()));
+        for range in &self.ppt_headers {
+            headers.push(BitReader::new(codestream.get(range.clone())?));
+        }
+        if let Some(ppm_idx) = self.ppm_idx
+            && let Some(ppm_marker) = header.ppm_packets.get(ppm_idx)
+        {
+            headers.push(BitReader::new(ppm_marker));
+        }
+
+        Some(TilePart::Separated(SeparatedTilePart {
+            headers,
+            active_header_reader: 0,
+            body: BitReader::new(body_bytes),
+            body_offset: self.body.start,
+        }))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Tile {
+    pub(crate) tile_parts: Vec<TilePartData>,
+    pub(crate) component_infos: Option<Vec<ComponentInfo>>,
     pub(crate) rect: IntRect,
     pub(crate) progression_order: ProgressionOrder,
     pub(crate) progression_changes: Vec<ProgressionChange>,
@@ -27,6 +69,7 @@ pub(crate) struct Tile<'a> {
 #[derive(Clone, Debug)]
 pub(crate) struct MergedTilePart<'a> {
     pub(crate) data: BitReader<'a>,
+    pub(crate) body_offset: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -34,6 +77,7 @@ pub(crate) struct SeparatedTilePart<'a> {
     pub(crate) headers: Vec<BitReader<'a>>,
     pub(crate) active_header_reader: usize,
     pub(crate) body: BitReader<'a>,
+    pub(crate) body_offset: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -69,57 +113,94 @@ impl<'a> TilePart<'a> {
             TilePart::Separated(s) => &mut s.body,
         }
     }
+
+    pub(crate) fn body_offset(&self) -> usize {
+        match self {
+            TilePart::Merged(m) => m.body_offset,
+            TilePart::Separated(s) => s.body_offset,
+        }
+    }
 }
 
-impl<'a> Tile<'a> {
+impl Tile {
     pub(crate) fn new(idx: u32, header: &Header) -> Self {
-        let rect = {
-            let size_data = &header.size_data;
-
-            let x_coord = u64::from(size_data.tile_x_coord(idx));
-            let y_coord = u64::from(size_data.tile_y_coord(idx));
-
-            let x0 = (x_coord * u64::from(size_data.tile_width)) as u32;
-            let y0 = (y_coord * u64::from(size_data.tile_height)) as u32;
-
-            let x1 = u64::min(
-                (x_coord + 1) * u64::from(size_data.tile_width),
-                u64::from(size_data.reference_grid_width),
-            ) as u32;
-            let y1 = u64::min(
-                (y_coord + 1) * u64::from(size_data.tile_height),
-                u64::from(size_data.reference_grid_height),
-            ) as u32;
-
-            IntRect::from_ltrb(x0, y0, x1, y1)
-        };
-
-        Tile {
+        let mut tile = Self {
             tile_parts: vec![],
-            rect,
-            component_infos: header.component_infos.clone(),
+            component_infos: None,
+            rect: IntRect::from_ltrb(0, 0, 0, 0),
             progression_order: header.global_coding_style.progression_order,
             progression_changes: vec![],
             mct: header.global_coding_style.mct,
             num_layers: header.global_coding_style.num_layers,
-        }
+        };
+        tile.reset(idx, header);
+        tile
     }
 
-    pub(crate) fn component_tiles(&self) -> impl Iterator<Item = ComponentTile<'_>> {
+    pub(crate) fn reset(&mut self, idx: u32, header: &Header) {
+        let size_data = &header.size_data;
+
+        let x_coord = u64::from(size_data.tile_x_coord(idx));
+        let y_coord = u64::from(size_data.tile_y_coord(idx));
+
+        let x0 = (x_coord * u64::from(size_data.tile_width)) as u32;
+        let y0 = (y_coord * u64::from(size_data.tile_height)) as u32;
+
+        let x1 = u64::min(
+            (x_coord + 1) * u64::from(size_data.tile_width),
+            u64::from(size_data.reference_grid_width),
+        ) as u32;
+        let y1 = u64::min(
+            (y_coord + 1) * u64::from(size_data.tile_height),
+            u64::from(size_data.reference_grid_height),
+        ) as u32;
+
+        self.tile_parts.clear();
+        self.component_infos = None;
+        self.rect = IntRect::from_ltrb(x0, y0, x1, y1);
+        self.progression_order = header.global_coding_style.progression_order;
+        self.progression_changes.clear();
+        self.mct = header.global_coding_style.mct;
+        self.num_layers = header.global_coding_style.num_layers;
+    }
+
+    pub(crate) fn component_infos<'a>(&'a self, header: &'a Header) -> &'a [ComponentInfo] {
         self.component_infos
+            .as_deref()
+            .unwrap_or(&header.component_infos)
+    }
+
+    pub(crate) fn component_infos_mut(&mut self, header: &Header) -> &mut Vec<ComponentInfo> {
+        self.component_infos
+            .get_or_insert_with(|| header.component_infos.clone())
+    }
+
+    pub(crate) fn component_tiles<'a>(
+        &'a self,
+        header: &'a Header,
+    ) -> impl Iterator<Item = ComponentTile<'a>> {
+        self.component_infos(header)
             .iter()
             .map(|i| ComponentTile::new(self, i))
     }
 }
 
-pub(crate) fn parse<'a>(
-    reader: &mut BitReader<'a>,
-    main_header: &'a Header,
-) -> Result<Vec<Tile<'a>>> {
-    let tile_count = main_header.size_data.num_tiles()?;
-    let mut tiles = (0..tile_count)
-        .map(|idx| Tile::new(idx, main_header))
-        .collect::<Vec<_>>();
+pub(crate) fn parse(
+    reader: &mut BitReader<'_>,
+    main_header: &Header,
+    tiles_buf: &mut Vec<Tile>,
+) -> Result<usize> {
+    let tile_count = main_header.size_data.num_tiles()? as usize;
+    for (idx, tile) in tiles_buf.iter_mut().take(tile_count).enumerate() {
+        tile.reset(idx as u32, main_header);
+    }
+    while tiles_buf.len() < tile_count {
+        let idx = tiles_buf.len() as u32;
+        tiles_buf.push(Tile::new(idx, main_header));
+    }
+    let tiles = tiles_buf
+        .get_mut(..tile_count)
+        .ok_or(DecodeError::Malformed)?;
 
     let mut marker_budget = main_header.marker_budget;
     let mut tile_part_idx = 0;
@@ -128,11 +209,11 @@ pub(crate) fn parse<'a>(
         if !parse_tile_part(
             reader,
             main_header,
-            &mut tiles,
+            tiles,
             tile_part_idx,
             &mut marker_budget,
         )? {
-            return Ok(tiles);
+            return Ok(tile_count);
         }
         tile_part_idx += 1;
     }
@@ -144,13 +225,13 @@ pub(crate) fn parse<'a>(
         }
     }
 
-    Ok(tiles)
+    Ok(tile_count)
 }
 
-fn parse_tile_part<'a>(
-    reader: &mut BitReader<'a>,
-    main_header: &'a Header,
-    tiles: &mut [Tile<'a>],
+fn parse_tile_part(
+    reader: &mut BitReader<'_>,
+    main_header: &Header,
+    tiles: &mut [Tile],
     tile_part_idx: usize,
     marker_budget: &mut MarkerBudget,
 ) -> Result<bool> {
@@ -189,7 +270,7 @@ fn parse_tile_part<'a>(
         bail!(DecodeError::TooLarge);
     }
 
-    let mut ppt_headers = vec![];
+    let mut ppt_headers: Vec<(u8, Range<usize>)> = vec![];
     let mut coding_style_changed = false;
     let mut saw_sod = false;
 
@@ -200,7 +281,7 @@ fn parse_tile_part<'a>(
             if coding_style_changed {
                 validate_resource_limits(
                     &main_header.size_data,
-                    &tile.component_infos,
+                    tile.component_infos(main_header),
                     tile.num_layers,
                 )?;
             }
@@ -219,7 +300,7 @@ fn parse_tile_part<'a>(
             if coding_style_changed {
                 validate_resource_limits(
                     &main_header.size_data,
-                    &tile.component_infos,
+                    tile.component_infos(main_header),
                     tile.num_layers,
                 )?;
             }
@@ -230,7 +311,7 @@ fn parse_tile_part<'a>(
             if coding_style_changed {
                 validate_resource_limits(
                     &main_header.size_data,
-                    &tile.component_infos,
+                    tile.component_infos(main_header),
                     tile.num_layers,
                 )?;
             }
@@ -265,7 +346,7 @@ fn parse_tile_part<'a>(
             if coding_style_changed {
                 validate_resource_limits(
                     &main_header.size_data,
-                    &tile.component_infos,
+                    tile.component_infos(main_header),
                     tile.num_layers,
                 )?;
             }
@@ -279,7 +360,7 @@ fn parse_tile_part<'a>(
             if coding_style_changed {
                 validate_resource_limits(
                     &main_header.size_data,
-                    &tile.component_infos,
+                    tile.component_infos(main_header),
                     tile.num_layers,
                 )?;
             }
@@ -297,7 +378,7 @@ fn parse_tile_part<'a>(
                 tile.num_layers = cod.num_layers;
                 tile.progression_order = cod.progression_order;
 
-                for component in &mut tile.component_infos {
+                for component in tile.component_infos_mut(main_header) {
                     component.coding_style.flags.raw |= cod.component_parameters.flags.raw;
                     component.coding_style.parameters = cod.component_parameters.clone().parameters;
                 }
@@ -307,7 +388,7 @@ fn parse_tile_part<'a>(
                 let (component_index, coc) = codestream::coc_marker(reader)?;
 
                 let old = tile
-                    .component_infos
+                    .component_infos_mut(main_header)
                     .get_mut(component_index as usize)
                     .ok_or(DecodeError::Malformed)?;
 
@@ -318,7 +399,7 @@ fn parse_tile_part<'a>(
             markers::QCD => {
                 let qcd = codestream::qcd_marker(reader).ok_or(DecodeError::Malformed)?;
 
-                for component_info in &mut tile.component_infos {
+                for component_info in tile.component_infos_mut(main_header) {
                     component_info.quantization_info = qcd.clone();
                 }
             }
@@ -326,7 +407,7 @@ fn parse_tile_part<'a>(
                 let (component_index, qcc) =
                     codestream::qcc_marker(reader).ok_or(DecodeError::Malformed)?;
 
-                tile.component_infos
+                tile.component_infos_mut(main_header)
                     .get_mut(component_index as usize)
                     .ok_or(DecodeError::Malformed)?
                     .quantization_info = qcc;
@@ -336,13 +417,23 @@ fn parse_tile_part<'a>(
                     bail!(DecodeError::Malformed);
                 }
 
-                ppt_headers.push(ppt_marker(reader).ok_or(DecodeError::Malformed)?);
+                let length = reader
+                    .read_u16()
+                    .and_then(|l| l.checked_sub(2))
+                    .ok_or(DecodeError::Malformed)?;
+                let header_len = length.checked_sub(1).ok_or(DecodeError::Malformed)?;
+                let sequence_idx = reader.read_byte().ok_or(DecodeError::Malformed)?;
+                let data_start = reader.offset();
+                let bytes = reader
+                    .read_bytes(header_len as usize)
+                    .ok_or(DecodeError::Malformed)?;
+                ppt_headers.push((sequence_idx, data_start..data_start + bytes.len()));
             }
             markers::RGN => {
                 let (component_index, roi_shift) =
                     codestream::rgn_marker(reader).ok_or(DecodeError::Malformed)?;
 
-                tile.component_infos
+                tile.component_infos_mut(main_header)
                     .get_mut(component_index as usize)
                     .ok_or(DecodeError::Malformed)?
                     .roi_shift = roi_shift;
@@ -368,7 +459,7 @@ fn parse_tile_part<'a>(
     if coding_style_changed {
         validate_resource_limits(
             &main_header.size_data,
-            &tile.component_infos,
+            tile.component_infos(main_header),
             tile.num_layers,
         )?;
     }
@@ -377,6 +468,7 @@ fn parse_tile_part<'a>(
         return Ok(true);
     }
 
+    let body_offset = reader.offset();
     let data = if let Some(len) = declared_len {
         let Some(remaining_bytes) = len.checked_sub(reader.offset() - start) else {
             return if main_header.strict {
@@ -393,39 +485,32 @@ fn parse_tile_part<'a>(
         data
     };
 
-    ppt_headers.sort_by_key(|p1| p1.sequence_idx);
-    let mut headers: Vec<_> = ppt_headers.iter().map(|i| BitReader::new(i.data)).collect();
-
-    if let Some(ppm_marker) = main_header.ppm_packets.get(tile_part_idx) {
-        headers.push(BitReader::new(ppm_marker));
-    }
-
-    let tile_part = if !headers.is_empty() {
-        TilePart::Separated(SeparatedTilePart {
-            headers,
-            active_header_reader: 0,
-            body: BitReader::new(data),
-        })
+    ppt_headers.sort_by_key(|(seq, _)| *seq);
+    let ppt_ranges = if ppt_headers.is_empty() {
+        vec![]
     } else {
-        TilePart::Merged(MergedTilePart {
-            data: BitReader::new(data),
-        })
+        ppt_headers.into_iter().map(|(_, r)| r).collect()
     };
+    let ppm_idx = (tile_part_idx < main_header.ppm_packets.len()).then_some(tile_part_idx);
 
-    tile.tile_parts.push(tile_part);
+    tile.tile_parts.push(TilePartData {
+        body: body_offset..body_offset + data.len(),
+        ppt_headers: ppt_ranges,
+        ppm_idx,
+    });
 
     Ok(true)
 }
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct ComponentTile<'a> {
-    pub(crate) tile: &'a Tile<'a>,
+    pub(crate) tile: &'a Tile,
     pub(crate) component_info: &'a ComponentInfo,
     pub(crate) rect: IntRect,
 }
 
 impl<'a> ComponentTile<'a> {
-    pub(crate) fn new(tile: &'a Tile<'a>, component_info: &'a ComponentInfo) -> Self {
+    pub(crate) fn new(tile: &'a Tile, component_info: &'a ComponentInfo) -> Self {
         ComponentTile {
             tile,
             component_info,

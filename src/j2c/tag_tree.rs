@@ -2,14 +2,16 @@ use std::vec::Vec;
 
 use crate::reader::{BitReadError, BitReader};
 
+const NO_CHILD: u32 = u32::MAX;
+
 #[derive(Debug, PartialEq, Eq, Clone, Default)]
 pub(crate) struct TagNode {
     width: u32,
     height: u32,
     value: u32,
-    initialized: bool,
+    children: [u32; 4],
     level: u16,
-    children: [usize; 4],
+    initialized: bool,
 }
 
 impl TagNode {
@@ -20,7 +22,7 @@ impl TagNode {
             level,
             value: 0,
             initialized: false,
-            children: [usize::MAX, usize::MAX, usize::MAX, usize::MAX],
+            children: [NO_CHILD; 4],
         }
     }
 
@@ -46,13 +48,13 @@ impl TagNode {
         let top_left_width = tag.top_left_width();
         let top_left_height = tag.top_left_height();
 
-        let push = |node: Self, nodes: &mut Vec<Self>| -> usize {
+        let push = |node: Self, nodes: &mut Vec<Self>| -> u32 {
             if node.width > 0 && node.height > 0 {
-                let node_idx = nodes.len();
+                let node_idx = u32::try_from(nodes.len()).unwrap_or(NO_CHILD);
                 nodes.push(node);
                 node_idx
             } else {
-                usize::MAX
+                NO_CHILD
             }
         };
 
@@ -124,9 +126,17 @@ fn read_tag_node(
     let top = y < top_left_height;
 
     match (left, top) {
-        (true, true) => read_tag_node(node.children[0], x, y, reader, node.value, max_val, nodes),
+        (true, true) => read_tag_node(
+            node.children[0] as usize,
+            x,
+            y,
+            reader,
+            node.value,
+            max_val,
+            nodes,
+        ),
         (false, true) => read_tag_node(
-            node.children[1],
+            node.children[1] as usize,
             x - top_left_width,
             y,
             reader,
@@ -135,7 +145,7 @@ fn read_tag_node(
             nodes,
         ),
         (true, false) => read_tag_node(
-            node.children[2],
+            node.children[2] as usize,
             x,
             y - top_left_height,
             reader,
@@ -144,7 +154,7 @@ fn read_tag_node(
             nodes,
         ),
         (false, false) => read_tag_node(
-            node.children[3],
+            node.children[3] as usize,
             x - top_left_width,
             y - top_left_height,
             reader,

@@ -140,7 +140,7 @@ pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspec
 
     let main_header = codestream::read_header(&mut reader, settings)?;
     let tile_count = main_header.size_data.num_tiles()?;
-    let mut tiles: Vec<Tile<'_>> = (0..tile_count)
+    let mut tiles: Vec<Tile> = (0..tile_count)
         .map(|idx| Tile::new(idx, &main_header))
         .collect();
     let mut tile_parts: Vec<Vec<InspectTilePart<'_>>> =
@@ -167,7 +167,7 @@ pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspec
     let levels = tiles
         .iter()
         .flat_map(|t| {
-            t.component_infos
+            t.component_infos(&main_header)
                 .iter()
                 .map(|c| c.num_decomposition_levels())
         })
@@ -197,6 +197,7 @@ pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspec
             continue;
         }
 
+        let component_infos = tile.component_infos(&main_header);
         let mut prog = progression_iterator(tile, &main_header)?;
         let use_plt = parts.iter().all(|tp| !tp.plt_markers.is_empty());
 
@@ -215,7 +216,7 @@ pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspec
                     let present =
                         pkt_end <= data_len && tp.declared_end.is_none_or(|end| pkt_end <= end);
                     record_packet(
-                        &tile.component_infos,
+                        component_infos,
                         prog_data,
                         pkt_end,
                         present,
@@ -227,13 +228,13 @@ pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspec
                 }
             }
         } else {
-            build_header_state(tile, &mut state, cancel)?;
+            build_header_state(tile, &main_header, &mut state, cancel)?;
             for tp in parts.iter_mut() {
                 cancel.check()?;
                 parse_tile_part_packets(
                     tp,
                     &mut prog,
-                    &tile.component_infos,
+                    component_infos,
                     &mut state,
                     data_len,
                     levels,
@@ -284,7 +285,7 @@ pub(crate) fn inspect(stream: &[u8], settings: &DecodeSettings) -> Result<Inspec
 fn parse_tile_part<'a>(
     reader: &mut BitReader<'a>,
     main_header: &'a Header,
-    tiles: &mut [Tile<'a>],
+    tiles: &mut [Tile],
     tile_parts: &mut [Vec<InspectTilePart<'a>>],
     tile_part_idx: usize,
     marker_budget: &mut MarkerBudget,
@@ -379,7 +380,7 @@ fn parse_tile_part<'a>(
                 tile.mct = cod.mct;
                 tile.num_layers = cod.num_layers;
                 tile.progression_order = cod.progression_order;
-                for component in &mut tile.component_infos {
+                for component in tile.component_infos_mut(main_header) {
                     component.coding_style.flags.raw |= cod.component_parameters.flags.raw;
                     component.coding_style.parameters = cod.component_parameters.clone().parameters;
                 }
@@ -388,7 +389,7 @@ fn parse_tile_part<'a>(
             markers::COC => {
                 let (component_index, coc) = codestream::coc_marker(reader)?;
                 let old = tile
-                    .component_infos
+                    .component_infos_mut(main_header)
                     .get_mut(usize::from(component_index))
                     .ok_or(DecodeError::Malformed)?;
                 old.coding_style.parameters = coc.parameters;
@@ -397,14 +398,14 @@ fn parse_tile_part<'a>(
             }
             markers::QCD => {
                 let qcd = codestream::qcd_marker(reader).ok_or(DecodeError::Malformed)?;
-                for component_info in &mut tile.component_infos {
+                for component_info in tile.component_infos_mut(main_header) {
                     component_info.quantization_info = qcd.clone();
                 }
             }
             markers::QCC => {
                 let (component_index, qcc) =
                     codestream::qcc_marker(reader).ok_or(DecodeError::Malformed)?;
-                tile.component_infos
+                tile.component_infos_mut(main_header)
                     .get_mut(usize::from(component_index))
                     .ok_or(DecodeError::Malformed)?
                     .quantization_info = qcc;
@@ -421,7 +422,7 @@ fn parse_tile_part<'a>(
             markers::RGN => {
                 let (component_index, roi_shift) =
                     codestream::rgn_marker(reader).ok_or(DecodeError::Malformed)?;
-                tile.component_infos
+                tile.component_infos_mut(main_header)
                     .get_mut(usize::from(component_index))
                     .ok_or(DecodeError::Malformed)?
                     .roi_shift = roi_shift;
@@ -444,7 +445,7 @@ fn parse_tile_part<'a>(
     if coding_style_changed {
         validate_resource_limits(
             &main_header.size_data,
-            &tile.component_infos,
+            tile.component_infos(main_header),
             tile.num_layers,
         )?;
     }
@@ -478,10 +479,12 @@ fn parse_tile_part<'a>(
             headers,
             active_header_reader: 0,
             body: BitReader::new(body_bytes),
+            body_offset: sod_end,
         })
     } else {
         TilePart::Merged(MergedTilePart {
             data: BitReader::new(body_bytes),
+            body_offset: sod_end,
         })
     };
 
@@ -531,18 +534,19 @@ fn parse_plt_lengths(markers: &[PltMarkerData<'_>]) -> Result<Vec<usize>> {
 }
 
 fn count_expected(
-    tile: &Tile<'_>,
+    tile: &Tile,
     main_header: &Header,
     levels: u8,
     stride: usize,
     buckets: &mut [Bucket],
 ) -> Result<()> {
+    let component_infos = tile.component_infos(main_header);
     let has_poc =
         !tile.progression_changes.is_empty() || !main_header.progression_changes.is_empty();
     if has_poc {
         let prog = progression_iterator(tile, main_header)?;
         for data in prog {
-            let Some(info) = tile.component_infos.get(usize::from(data.component)) else {
+            let Some(info) = component_infos.get(usize::from(data.component)) else {
                 continue;
             };
             let max_d = info
@@ -558,7 +562,7 @@ fn count_expected(
         return Ok(());
     }
 
-    for info in &tile.component_infos {
+    for info in component_infos {
         let ct = ComponentTile::new(tile, info);
         let n_l = info.num_decomposition_levels();
         for r in 0..info.num_resolution_levels() {
@@ -603,7 +607,12 @@ fn record_packet(
     }
 }
 
-fn build_header_state(tile: &Tile<'_>, state: &mut HeaderState, cancel: Cancel<'_>) -> Result<()> {
+fn build_header_state(
+    tile: &Tile,
+    header: &Header,
+    state: &mut HeaderState,
+    cancel: Cancel<'_>,
+) -> Result<()> {
     state.code_blocks.clear();
     state.precincts.clear();
     state.tag_tree_nodes.clear();
@@ -611,7 +620,7 @@ fn build_header_state(tile: &Tile<'_>, state: &mut HeaderState, cancel: Cancel<'
     state.decompositions.clear();
     state.components.clear();
 
-    for component_tile in tile.component_tiles() {
+    for component_tile in tile.component_tiles(header) {
         let d_start = state.decompositions.len();
         let mut resolution_tiles = component_tile.resolution_tiles();
 
