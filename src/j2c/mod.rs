@@ -17,20 +17,14 @@ use crate::j2c::codestream::markers;
 use crate::reader::BitReader;
 use crate::{DecodeSettings, Image};
 
-use crate::math::{SIMD_WIDTH, SimdBuffer};
 pub(crate) use codestream::{Header, MAX_RESOLUTIONS};
-pub(crate) use decode::{DecodeParams, DecoderContext, decode};
+pub(crate) use decode::{DecodeParams, decode};
 pub use inspect::Inspection;
 pub(crate) use inspect::inspect;
 
 pub(crate) struct ParsedCodestream<'a> {
     pub(crate) header: Header,
     pub(crate) data: &'a [u8],
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ComponentData {
-    pub(crate) container: SimdBuffer<{ SIMD_WIDTH }>,
 }
 
 pub(crate) fn parse<'a>(stream: &'a [u8], settings: &DecodeSettings) -> Result<Image<'a>> {

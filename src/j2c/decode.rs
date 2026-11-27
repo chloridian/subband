@@ -6,16 +6,16 @@ use super::build::{CodeBlock, Decomposition, Layer, Precinct, Segment, SubBand, 
 use super::codestream::{
     ComponentInfo, Header, MAX_RESOLUTIONS, QuantizationStyle, WaveletTransform,
 };
-use super::idwt::{IdwtScratch, OutputPlane};
-use super::progression::{ProgressionIterator, progression_iterator};
+use super::progression::progression_iterator;
+use super::rect::IntRect;
 use super::tag_tree::TagNode;
 use super::tile::{ComponentTile, ResolutionTile, Tile};
-use super::{ComponentData, bitplane, build, idwt, mct, segment, tile};
+use super::{bitplane, build, idwt, mct, segment, tile};
 use crate::Decoded;
 use crate::cancel::Cancel;
 use crate::error::{DecodeError, Result, bail};
 use crate::j2c::segment::MAX_BITPLANE_COUNT;
-use crate::math::{self, SimdBuffer};
+use crate::math;
 use crate::reader::BitReader;
 
 #[derive(Clone, Copy)]
@@ -24,286 +24,6 @@ pub(crate) struct DecodeParams {
     pub(crate) max_layers: Option<u8>,
     pub(crate) width: u32,
     pub(crate) height: u32,
-}
-
-pub(crate) fn decode(
-    data: &[u8],
-    header: &Header,
-    params: DecodeParams,
-    ctx: &mut DecoderContext,
-    cancel: Cancel<'_>,
-) -> Result<Decoded> {
-    let mut reader = BitReader::new(data);
-    let tile_count = tile::parse(&mut reader, header, &mut ctx.tiles)?;
-    if tile_count == 0 {
-        bail!(DecodeError::Malformed);
-    }
-
-    let first_tile = ctx.tiles.first().ok_or(DecodeError::Malformed)?;
-    let first_mct = first_tile.mct;
-    let num_components = first_tile.component_infos(header).len();
-    let zero_channels = tile_count != 1
-        || first_tile.tile_parts.is_empty()
-        || !first_tile
-            .component_infos(header)
-            .iter()
-            .all(|ci| is_full_image_tile(first_tile, ci, params));
-
-    ctx.reset(params, num_components, zero_channels, cancel)?;
-
-    let decoded_resolutions = usize::from(header.levels - params.skipped_resolution_levels) + 1;
-    let mut layers_received = [u8::MAX; MAX_RESOLUTIONS];
-    let layers_slice = layers_received
-        .get_mut(..decoded_resolutions)
-        .ok_or(DecodeError::Malformed)?;
-
-    let tiles = ctx.tiles.get(..tile_count).ok_or(DecodeError::Malformed)?;
-    for tile in tiles {
-        cancel.check()?;
-
-        if tile.tile_parts.is_empty() {
-            layers_slice.fill(0);
-            continue;
-        }
-
-        let num_layers = usize::from(tile.num_layers);
-        ctx.received_packets.clear();
-        ctx.received_packets
-            .resize(decoded_resolutions * num_layers, 0);
-
-        let progression_iterator = progression_iterator(tile, header)?;
-        let channel_data = ctx
-            .channel_data
-            .get_mut(..num_components)
-            .ok_or(DecodeError::Malformed)?;
-
-        decode_tile(
-            data,
-            tile,
-            header,
-            params,
-            progression_iterator,
-            &mut ctx.tile_decode_context,
-            channel_data,
-            &mut ctx.storage,
-            &mut ctx.received_packets,
-            decoded_resolutions,
-            cancel,
-        )?;
-
-        update_layers_received(
-            tile,
-            header,
-            params.max_layers,
-            decoded_resolutions,
-            &ctx.received_packets,
-            &mut ctx.expected_packets,
-            layers_slice,
-        )?;
-    }
-
-    let channel_data = ctx
-        .channel_data
-        .get_mut(..num_components)
-        .ok_or(DecodeError::Malformed)?;
-
-    if first_mct {
-        let first_tile = ctx.tiles.first().ok_or(DecodeError::Malformed)?;
-        mct::apply_inverse(
-            channel_data,
-            first_tile.component_infos(header),
-            header,
-            cancel,
-        )?;
-    }
-
-    apply_sign_shift(channel_data, cancel)?;
-
-    Ok(Decoded::new(
-        params.width,
-        params.height,
-        num_components as u8,
-        layers_received,
-        decoded_resolutions as u8,
-    ))
-}
-
-fn update_layers_received(
-    tile: &Tile,
-    header: &Header,
-    max_layers: Option<u8>,
-    decoded_resolutions: usize,
-    received_packets: &[u64],
-    expected_packets: &mut Vec<u64>,
-    layers_received: &mut [u8],
-) -> Result<()> {
-    let num_layers = usize::from(tile.num_layers);
-    let effective_layers = max_layers.map_or(tile.num_layers, |m| m.min(tile.num_layers));
-
-    expected_packets.clear();
-    expected_packets.resize(decoded_resolutions * num_layers, 0);
-    for data in progression_iterator(tile, header)? {
-        let r = usize::from(data.resolution);
-        let l = usize::from(data.layer_num);
-        if r < decoded_resolutions
-            && let Some(slot) = expected_packets.get_mut(r * num_layers + l)
-        {
-            *slot = slot.saturating_add(1);
-        }
-    }
-
-    for (r, out) in layers_received.iter_mut().enumerate() {
-        let complete = (0..usize::from(effective_layers))
-            .take_while(|l| {
-                let i = r * num_layers + l;
-                let expected = expected_packets.get(i).copied().unwrap_or(0);
-                let received = received_packets.get(i).copied().unwrap_or(0);
-                expected > 0 && received >= expected
-            })
-            .count();
-        *out = (*out).min(u8::try_from(complete).unwrap_or(u8::MAX));
-    }
-
-    Ok(())
-}
-
-#[derive(Default)]
-pub(crate) struct DecoderContext {
-    tiles: Vec<Tile>,
-    tile_decode_context: TileDecodeContext,
-    pub(crate) channel_data: Vec<ComponentData>,
-    received_packets: Vec<u64>,
-    expected_packets: Vec<u64>,
-    storage: DecompositionStorage,
-}
-
-impl DecoderContext {
-    fn reset(
-        &mut self,
-        params: DecodeParams,
-        num_components: usize,
-        zero_channels: bool,
-        cancel: Cancel<'_>,
-    ) -> Result<()> {
-        self.tile_decode_context.reset();
-        self.storage.reset();
-
-        let sample_count = (params.width as usize)
-            .checked_mul(params.height as usize)
-            .ok_or(DecodeError::TooLarge)?;
-        if self.channel_data.len() < num_components {
-            self.channel_data
-                .resize_with(num_components, || ComponentData {
-                    container: SimdBuffer::default(),
-                });
-        }
-        for channel in self
-            .channel_data
-            .get_mut(..num_components)
-            .ok_or(DecodeError::Malformed)?
-        {
-            cancel.check()?;
-
-            channel
-                .container
-                .prepare(sample_count, zero_channels, cancel)?;
-        }
-
-        Ok(())
-    }
-}
-
-fn is_full_image_tile(tile: &Tile, component_info: &ComponentInfo, params: DecodeParams) -> bool {
-    let component_tile = ComponentTile::new(tile, component_info);
-    let resolution_tile = ResolutionTile::new(
-        component_tile,
-        component_info.num_resolution_levels() - 1 - params.skipped_resolution_levels,
-    );
-    resolution_tile.rect.x0 == 0
-        && resolution_tile.rect.y0 == 0
-        && resolution_tile.rect.width() == params.width
-        && resolution_tile.rect.height() == params.height
-}
-
-fn decode_tile(
-    codestream: &[u8],
-    tile: &Tile,
-    header: &Header,
-    params: DecodeParams,
-    progression_iterator: ProgressionIterator<'_>,
-    tile_ctx: &mut TileDecodeContext,
-    channel_data: &mut [ComponentData],
-    storage: &mut DecompositionStorage,
-    received_packets: &mut [u64],
-    decoded_resolutions: usize,
-    cancel: Cancel<'_>,
-) -> Result<()> {
-    storage.reset();
-
-    build::build(
-        tile,
-        header,
-        storage,
-        params.skipped_resolution_levels,
-        cancel,
-    )?;
-    segment::parse(
-        codestream,
-        tile,
-        progression_iterator,
-        header,
-        params.skipped_resolution_levels,
-        storage,
-        received_packets,
-        decoded_resolutions,
-        cancel,
-    )?;
-
-    for ((idx, component_info), channel) in tile
-        .component_infos(header)
-        .iter()
-        .enumerate()
-        .zip(channel_data.iter_mut())
-    {
-        cancel.check()?;
-
-        let component_tile = ComponentTile::new(tile, component_info);
-        let resolution_tile = ResolutionTile::new(
-            component_tile,
-            component_info.num_resolution_levels() - 1 - params.skipped_resolution_levels,
-        );
-        let full_image_tile = resolution_tile.rect.x0 == 0
-            && resolution_tile.rect.y0 == 0
-            && resolution_tile.rect.width() == params.width
-            && resolution_tile.rect.height() == params.height;
-
-        let output_plane = OutputPlane {
-            data: &mut channel.container,
-            stride: params.width as usize,
-            x0: resolution_tile.rect.x0 as usize,
-            y0: resolution_tile.rect.y0 as usize,
-        };
-
-        idwt::apply(
-            codestream,
-            storage,
-            &mut tile_ctx.idwt_scratch,
-            &mut tile_ctx.bit_plane_decode_context,
-            &mut tile_ctx.bit_plane_decode_buffers,
-            output_plane,
-            full_image_tile,
-            idx,
-            component_info,
-            header,
-            params,
-            cancel,
-        )?;
-        if full_image_tile {
-            channel.container.restore_padding();
-        }
-    }
-
-    Ok(())
 }
 
 #[derive(Clone)]
@@ -391,15 +111,192 @@ impl DecompositionStorage {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct TileDecodeContext {
-    pub(crate) idwt_scratch: IdwtScratch,
-    pub(crate) bit_plane_decode_context: BitPlaneDecodeContext,
-    pub(crate) bit_plane_decode_buffers: BitPlaneDecodeBuffers,
+pub(crate) fn decode(
+    data: &[u8],
+    header: &Header,
+    params: DecodeParams,
+    out: &mut [u8],
+    cancel: Cancel<'_>,
+) -> Result<Decoded> {
+    cancel.check()?;
+
+    let mut reader = BitReader::new(data);
+    let mut tiles = Vec::new();
+    let tile_count = tile::parse(&mut reader, header, &mut tiles)?;
+    if tile_count == 0 {
+        bail!(DecodeError::Malformed);
+    }
+
+    let first_tile = tiles.first().ok_or(DecodeError::Malformed)?;
+    let num_components = first_tile.component_infos(header).len();
+    let decoded_resolutions = usize::from(header.levels - params.skipped_resolution_levels) + 1;
+    let mut layers_received = [u8::MAX; MAX_RESOLUTIONS];
+    let layers_slice = layers_received
+        .get_mut(..decoded_resolutions)
+        .ok_or(DecodeError::Malformed)?;
+
+    let mut storage = DecompositionStorage::default();
+    let mut bit_plane_ctx = BitPlaneDecodeContext::default();
+    let mut bit_plane_buffers = BitPlaneDecodeBuffers::default();
+    let mut received_packets = Vec::new();
+    let mut expected_packets = Vec::new();
+
+    let tiles = tiles.get(..tile_count).ok_or(DecodeError::Malformed)?;
+    for tile in tiles {
+        cancel.check()?;
+
+        let component_infos = tile.component_infos(header);
+        let tile_mct = mct::tile_mct(tile.mct, component_infos, header.strict)?;
+        let first_ci = component_infos.first().ok_or(DecodeError::Malformed)?;
+        let res_idx = first_ci
+            .num_resolution_levels()
+            .checked_sub(1 + params.skipped_resolution_levels)
+            .ok_or(DecodeError::Malformed)?;
+        let tile_rect = ResolutionTile::new(ComponentTile::new(tile, first_ci), res_idx).rect;
+
+        if tile.tile_parts.is_empty() {
+            layers_slice.fill(0);
+            fill_tile_rect(
+                out,
+                params.width as usize,
+                num_components,
+                tile_rect,
+                128,
+                cancel,
+            )?;
+            continue;
+        }
+
+        let num_layers = usize::from(tile.num_layers);
+        received_packets.clear();
+        received_packets.resize(decoded_resolutions * num_layers, 0);
+
+        let progression_iterator = progression_iterator(tile, header)?;
+        storage.reset();
+
+        build::build(
+            tile,
+            header,
+            &mut storage,
+            params.skipped_resolution_levels,
+            cancel,
+        )?;
+        segment::parse(
+            data,
+            tile,
+            progression_iterator,
+            header,
+            params.skipped_resolution_levels,
+            &mut storage,
+            &mut received_packets,
+            decoded_resolutions,
+            cancel,
+        )?;
+
+        idwt::apply_tile(
+            data,
+            &storage,
+            tile_rect,
+            component_infos,
+            tile_mct,
+            &mut bit_plane_ctx,
+            &mut bit_plane_buffers,
+            header,
+            params,
+            out,
+            cancel,
+        )?;
+
+        update_layers_received(
+            tile,
+            header,
+            params.max_layers,
+            decoded_resolutions,
+            &received_packets,
+            &mut expected_packets,
+            layers_slice,
+        )?;
+    }
+
+    Ok(Decoded::new(
+        params.width,
+        params.height,
+        num_components as u8,
+        layers_received,
+        decoded_resolutions as u8,
+    ))
 }
 
-impl TileDecodeContext {
-    fn reset(&mut self) {}
+fn fill_tile_rect(
+    out: &mut [u8],
+    image_width: usize,
+    num_components: usize,
+    rect: IntRect,
+    value: u8,
+    cancel: Cancel<'_>,
+) -> Result<()> {
+    let width = rect.width() as usize;
+    let height = rect.height() as usize;
+    if width == 0 || height == 0 {
+        return Ok(());
+    }
+    let x0 = rect.x0 as usize;
+    let y0 = rect.y0 as usize;
+    let row_bytes = width
+        .checked_mul(num_components)
+        .ok_or(DecodeError::Malformed)?;
+    for y in 0..height {
+        cancel.check()?;
+        let start = (y0 + y)
+            .checked_mul(image_width)
+            .and_then(|r| r.checked_add(x0))
+            .and_then(|p| p.checked_mul(num_components))
+            .ok_or(DecodeError::Malformed)?;
+        out.get_mut(start..)
+            .and_then(|s| s.get_mut(..row_bytes))
+            .ok_or(DecodeError::Malformed)?
+            .fill(value);
+    }
+    Ok(())
+}
+
+fn update_layers_received(
+    tile: &Tile,
+    header: &Header,
+    max_layers: Option<u8>,
+    decoded_resolutions: usize,
+    received_packets: &[u64],
+    expected_packets: &mut Vec<u64>,
+    layers_received: &mut [u8],
+) -> Result<()> {
+    let num_layers = usize::from(tile.num_layers);
+    let effective_layers = max_layers.map_or(tile.num_layers, |m| m.min(tile.num_layers));
+
+    expected_packets.clear();
+    expected_packets.resize(decoded_resolutions * num_layers, 0);
+    for data in progression_iterator(tile, header)? {
+        let r = usize::from(data.resolution);
+        let l = usize::from(data.layer_num);
+        if r < decoded_resolutions
+            && let Some(slot) = expected_packets.get_mut(r * num_layers + l)
+        {
+            *slot = slot.saturating_add(1);
+        }
+    }
+
+    for (r, out) in layers_received.iter_mut().enumerate() {
+        let complete = (0..usize::from(effective_layers))
+            .take_while(|l| {
+                let i = r * num_layers + l;
+                let expected = expected_packets.get(i).copied().unwrap_or(0);
+                let received = received_packets.get(i).copied().unwrap_or(0);
+                expected > 0 && received >= expected
+            })
+            .count();
+        *out = (*out).min(u8::try_from(complete).unwrap_or(u8::MAX));
+    }
+
+    Ok(())
 }
 
 pub(crate) fn decode_sub_band_strip(
@@ -587,24 +484,6 @@ pub(crate) fn decode_sub_band_strip_into(
                 dequantization_step,
             )?;
         }
-    }
-
-    Ok(())
-}
-
-fn apply_sign_shift(channel_data: &mut [ComponentData], cancel: Cancel<'_>) -> Result<()> {
-    use crate::math::{Level, dispatch, f32x8};
-
-    for channel in channel_data.iter_mut() {
-        cancel.check()?;
-
-        dispatch!(Level::new(), simd => {
-            let offset_v = f32x8::splat(simd, 128.0);
-            for chunk in channel.container.as_chunks_mut::<8>().0 {
-                let v = f32x8::from_slice(simd, chunk);
-                (v + offset_v).store(chunk);
-            }
-        });
     }
 
     Ok(())

@@ -8,11 +8,10 @@ mod jp2;
 pub(crate) mod math;
 pub(crate) mod reader;
 
-use crate::cancel::{CHUNK, Cancel};
+use crate::cancel::Cancel;
 pub use crate::error::{DecodeError, Result};
 pub use crate::j2c::Inspection;
-use crate::j2c::{ComponentData, DecodeParams, DecoderContext, Header, MAX_RESOLUTIONS};
-use crate::math::{Level, Simd, dispatch};
+use crate::j2c::{DecodeParams, Header, MAX_RESOLUTIONS};
 
 pub(crate) const JP2_MAGIC: &[u8] = b"\x00\x00\x00\x0C\x6A\x50\x20\x20";
 pub(crate) const CODESTREAM_MAGIC: &[u8] = b"\xFF\x4F\xFF\x51";
@@ -186,16 +185,7 @@ impl<'a> Image<'a> {
             height,
         };
         let cancel = Cancel(&cancelled);
-        let mut ctx = DecoderContext::default();
-        let decoded = j2c::decode(self.codestream, &self.header, params, &mut ctx, cancel)?;
-        let num_components = self.header.component_infos.len();
-        let decoded_components = ctx
-            .channel_data
-            .get(..num_components)
-            .ok_or(DecodeError::Malformed)?;
-        interleave_and_convert(decoded_components, out, cancel)?;
-
-        Ok(decoded)
+        j2c::decode(self.codestream, &self.header, params, out, cancel)
     }
 }
 
@@ -212,142 +202,5 @@ pub fn inspect(
         j2c::inspect(data, settings, max_layers)
     } else {
         Err(DecodeError::Malformed)
-    }
-}
-
-fn interleave_and_convert(
-    components: &[ComponentData],
-    buf: &mut [u8],
-    cancel: Cancel<'_>,
-) -> Result<()> {
-    let Some(first) = components.first() else {
-        return Ok(());
-    };
-    let num_components = components.len();
-    let max_len = first.container.truncated().len();
-    let mut start = 0;
-
-    while start < max_len {
-        cancel.check()?;
-
-        let end = (start + CHUNK).min(max_len);
-        let Some(out) = buf.get_mut(start * num_components..end * num_components) else {
-            break;
-        };
-        match components {
-            [c0] => {
-                if let Some(p0) = c0.container.get(start..end) {
-                    interleave_to_u8([p0], out);
-                }
-            }
-            [c0, c1] => {
-                if let (Some(p0), Some(p1)) =
-                    (c0.container.get(start..end), c1.container.get(start..end))
-                {
-                    interleave_to_u8([p0, p1], out);
-                }
-            }
-            [c0, c1, c2] => {
-                if let (Some(p0), Some(p1), Some(p2)) = (
-                    c0.container.get(start..end),
-                    c1.container.get(start..end),
-                    c2.container.get(start..end),
-                ) {
-                    interleave_to_u8([p0, p1, p2], out);
-                }
-            }
-            [c0, c1, c2, c3] => {
-                if let (Some(p0), Some(p1), Some(p2), Some(p3)) = (
-                    c0.container.get(start..end),
-                    c1.container.get(start..end),
-                    c2.container.get(start..end),
-                    c3.container.get(start..end),
-                ) {
-                    interleave_to_u8([p0, p1, p2, p3], out);
-                }
-            }
-            _ => unreachable!(),
-        }
-        start = end;
-    }
-
-    Ok(())
-}
-
-fn interleave_to_u8<const N: usize>(planes: [&[f32]; N], out: &mut [u8]) {
-    dispatch!(Level::new(), simd => interleave_to_u8_impl(simd, planes, out));
-}
-
-#[inline(always)]
-fn interleave_to_u8_impl<S: Simd, const N: usize>(simd: S, planes: [&[f32]; N], out: &mut [u8]) {
-    let pixels = planes
-        .iter()
-        .map(|plane| plane.len())
-        .fold(out.len() / N, usize::min);
-    let blocks = pixels / 16 * 16;
-    let Some(out) = out.get_mut(..pixels * N) else {
-        return;
-    };
-    let (out, tail) = out.split_at_mut(blocks * N);
-    let plane = |c: usize| {
-        planes
-            .get(c)
-            .and_then(|p| p.get(..blocks))
-            .unwrap_or(&[])
-            .as_chunks::<16>()
-            .0
-    };
-
-    match N {
-        1 => {
-            for (out, c0) in out.as_chunks_mut::<16>().0.iter_mut().zip(plane(0)) {
-                math::round_and_interleave(simd, [c0], out);
-            }
-        }
-        2 => {
-            for ((out, c0), c1) in out
-                .as_chunks_mut::<32>()
-                .0
-                .iter_mut()
-                .zip(plane(0))
-                .zip(plane(1))
-            {
-                math::round_and_interleave(simd, [c0, c1], out);
-            }
-        }
-        3 => {
-            for (((out, c0), c1), c2) in out
-                .as_chunks_mut::<48>()
-                .0
-                .iter_mut()
-                .zip(plane(0))
-                .zip(plane(1))
-                .zip(plane(2))
-            {
-                math::round_and_interleave(simd, [c0, c1, c2], out);
-            }
-        }
-        4 => {
-            for ((((out, c0), c1), c2), c3) in out
-                .as_chunks_mut::<64>()
-                .0
-                .iter_mut()
-                .zip(plane(0))
-                .zip(plane(1))
-                .zip(plane(2))
-                .zip(plane(3))
-            {
-                math::round_and_interleave(simd, [c0, c1, c2, c3], out);
-            }
-        }
-        _ => unreachable!(),
-    }
-
-    for (i, pixel) in tail.as_chunks_mut::<N>().0.iter_mut().enumerate() {
-        for (value, plane) in pixel.iter_mut().zip(planes) {
-            if let Some(&sample) = plane.get(blocks + i) {
-                *value = math::round_to_u8(sample);
-            }
-        }
     }
 }

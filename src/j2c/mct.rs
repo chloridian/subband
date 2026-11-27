@@ -1,111 +1,161 @@
-use super::ComponentData;
-use super::codestream::{Header, WaveletTransform};
-use crate::cancel::{CHUNK, Cancel};
-use crate::error::{DecodeError, Result, bail};
-use crate::math::{Level, Simd, dispatch, f32x8};
+use core::array;
 
-pub(crate) fn apply_inverse(
-    components: &mut [ComponentData],
-    component_infos: &[super::codestream::ComponentInfo],
-    header: &Header,
-    cancel: Cancel<'_>,
-) -> Result<()> {
-    if components.len() < 3 {
-        return if header.strict {
-            Err(DecodeError::Malformed)
-        } else {
-            Ok(())
-        };
+use super::codestream::{ComponentInfo, WaveletTransform};
+use crate::error::{DecodeError, Result, bail};
+use crate::math::{self, SIMD_WIDTH, Simd, f32x8};
+
+pub(crate) fn tile_mct(
+    enabled: bool,
+    component_infos: &[ComponentInfo],
+    strict: bool,
+) -> Result<Option<WaveletTransform>> {
+    if !enabled {
+        return Ok(None);
     }
 
-    let (s, _) = components.split_at_mut(3);
-    let [s0, s1, s2] = s else { unreachable!() };
-
     let [c0, c1, c2, ..] = component_infos else {
-        bail!(DecodeError::Malformed);
+        return if strict {
+            Err(DecodeError::Malformed)
+        } else {
+            Ok(None)
+        };
     };
 
     let transform = c0.wavelet_transform();
-
     if transform != c1.wavelet_transform() || transform != c2.wavelet_transform() {
         bail!(DecodeError::Malformed);
     }
 
-    if s0.container.len() != s1.container.len() || s1.container.len() != s2.container.len() {
-        bail!(DecodeError::Malformed);
-    }
-
-    for ((c0, c1), c2) in s0
-        .container
-        .chunks_mut(CHUNK)
-        .zip(s1.container.chunks_mut(CHUNK))
-        .zip(s2.container.chunks_mut(CHUNK))
-    {
-        cancel.check()?;
-
-        apply_inner(transform, c0, c1, c2);
-    }
-
-    Ok(())
-}
-
-fn apply_inner(transform: WaveletTransform, s0: &mut [f32], s1: &mut [f32], s2: &mut [f32]) {
-    dispatch!(Level::new(), simd => apply_inner_impl(simd, transform, s0, s1, s2));
+    Ok(Some(transform))
 }
 
 #[inline(always)]
-fn apply_inner_impl<S: Simd>(
+pub(crate) fn write_row<S: Simd>(
     simd: S,
-    transform: WaveletTransform,
-    s0: &mut [f32],
-    s1: &mut [f32],
-    s2: &mut [f32],
+    rows: &[&[f32]],
+    mct: Option<WaveletTransform>,
+    out: &mut [u8],
 ) {
-    match transform {
-        WaveletTransform::Irreversible97 => {
-            for ((y0, y1), y2) in s0
-                .as_chunks_mut::<8>()
-                .0
-                .iter_mut()
-                .zip(s1.as_chunks_mut::<8>().0)
-                .zip(s2.as_chunks_mut::<8>().0)
-            {
-                let y_0 = f32x8::from_slice(simd, y0);
-                let y_1 = f32x8::from_slice(simd, y1);
-                let y_2 = f32x8::from_slice(simd, y2);
+    match rows {
+        [r0] => write_row_n(simd, [*r0], None, out),
+        [r0, r1] => write_row_n(simd, [*r0, *r1], None, out),
+        [r0, r1, r2] => write_row_n(simd, [*r0, *r1, *r2], mct, out),
+        [r0, r1, r2, r3] => write_row_n(simd, [*r0, *r1, *r2, *r3], mct, out),
+        _ => {}
+    }
+}
 
-                let i0 = y_2.mul_add(f32x8::splat(simd, 1.402), y_0);
-                let i1 = y_2.mul_add(
+#[inline(always)]
+fn transform_8<S: Simd, const N: usize>(
+    simd: S,
+    mut v: [f32x8<S>; N],
+    mct: Option<WaveletTransform>,
+) -> [f32x8<S>; N] {
+    if let (Some(transform), [c0, c1, c2, ..]) = (mct, v.as_mut_slice()) {
+        let y0 = *c0;
+        let y1 = *c1;
+        let y2 = *c2;
+        match transform {
+            WaveletTransform::Irreversible97 => {
+                *c0 = y2.mul_add(f32x8::splat(simd, 1.402), y0);
+                *c1 = y2.mul_add(
                     f32x8::splat(simd, -0.71414),
-                    y_1.mul_add(f32x8::splat(simd, -0.34413), y_0),
+                    y1.mul_add(f32x8::splat(simd, -0.34413), y0),
                 );
-                let i2 = y_1.mul_add(f32x8::splat(simd, 1.772), y_0);
-
-                i0.store(y0);
-                i1.store(y1);
-                i2.store(y2);
+                *c2 = y1.mul_add(f32x8::splat(simd, 1.772), y0);
+            }
+            WaveletTransform::Reversible53 => {
+                let i1 = y0 - ((y2 + y1) * 0.25).floor();
+                *c0 = y2 + i1;
+                *c1 = i1;
+                *c2 = y1 + i1;
             }
         }
-        WaveletTransform::Reversible53 => {
-            for ((y0, y1), y2) in s0
-                .as_chunks_mut::<8>()
-                .0
-                .iter_mut()
-                .zip(s1.as_chunks_mut::<8>().0)
-                .zip(s2.as_chunks_mut::<8>().0)
-            {
-                let y_0 = f32x8::from_slice(simd, y0);
-                let y_1 = f32x8::from_slice(simd, y1);
-                let y_2 = f32x8::from_slice(simd, y2);
+    }
 
-                let i1 = y_0 - ((y_2 + y_1) * 0.25).floor();
-                let i0 = y_2 + i1;
-                let i2 = y_1 + i1;
+    let offset = f32x8::splat(simd, 128.0);
+    for c in &mut v {
+        *c += offset;
+    }
+    v
+}
 
-                i0.store(y0);
-                i1.store(y1);
-                i2.store(y2);
+#[inline(always)]
+fn write_row_n<S: Simd, const N: usize>(
+    simd: S,
+    rows: [&[f32]; N],
+    mct: Option<WaveletTransform>,
+    out: &mut [u8],
+) {
+    let pixels = rows
+        .iter()
+        .map(|row| row.len())
+        .fold(out.len() / N, usize::min);
+    let blocks = pixels / 16 * 16;
+    let Some(out) = out.get_mut(..pixels * N) else {
+        return;
+    };
+    let (out_main, mut out_tail) = out.split_at_mut(blocks * N);
+
+    let mut offset = 0;
+    for chunk in out_main.chunks_exact_mut(16 * N) {
+        let lo: [_; N] = transform_8(
+            simd,
+            array::from_fn(|c| {
+                let slice = rows
+                    .get(c)
+                    .and_then(|r| r.get(offset..offset + SIMD_WIDTH))
+                    .unwrap_or(&[]);
+                f32x8::from_slice(simd, slice)
+            }),
+            mct,
+        );
+        let hi: [_; N] = transform_8(
+            simd,
+            array::from_fn(|c| {
+                let slice = rows
+                    .get(c)
+                    .and_then(|r| r.get(offset + SIMD_WIDTH..offset + 16))
+                    .unwrap_or(&[]);
+                f32x8::from_slice(simd, slice)
+            }),
+            mct,
+        );
+        let zero = f32x8::splat(simd, 0.0);
+        let mut pairs_iter = lo.into_iter().zip(hi);
+        let pairs: [_; N] = array::from_fn(|_| pairs_iter.next().unwrap_or((zero, zero)));
+        math::round_and_interleave_f32x8(simd, pairs, chunk);
+        offset += 16;
+    }
+
+    while offset < pixels {
+        let count = (pixels - offset).min(SIMD_WIDTH);
+        let v: [_; N] = transform_8(
+            simd,
+            array::from_fn(|c| {
+                let mut tmp = [0.0_f32; SIMD_WIDTH];
+                if let Some(src) = rows.get(c).and_then(|r| r.get(offset..offset + count))
+                    && let Some(dst) = tmp.get_mut(..count)
+                {
+                    dst.copy_from_slice(src);
+                }
+                f32x8::from_slice(simd, &tmp)
+            }),
+            mct,
+        );
+        let mut stored = [[0.0_f32; SIMD_WIDTH]; N];
+        for (dst, vec) in stored.iter_mut().zip(v) {
+            vec.store(dst);
+        }
+        let (chunk, rest) = out_tail.split_at_mut(count * N);
+        out_tail = rest;
+        for (i, pixel) in chunk.as_chunks_mut::<N>().0.iter_mut().enumerate() {
+            for (value, channel) in pixel.iter_mut().zip(&stored) {
+                if let Some(&sample) = channel.get(i) {
+                    *value = math::round_to_u8(sample);
+                }
             }
         }
+        offset += count;
     }
 }
