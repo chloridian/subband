@@ -111,6 +111,37 @@ impl<'a> ArithmeticDecoder<'a> {
 
         d
     }
+
+    #[inline(always)]
+    #[expect(clippy::indexing_slicing)]
+    pub(crate) fn skip_zero_run_columns(
+        &mut self,
+        context: &mut ArithmeticDecoderContext,
+        flags_row: &[u32],
+        mut x: usize,
+    ) -> (usize, bool) {
+        let mut qe = u32::from(QE_TABLE[context.index() as usize].qe);
+        let width = flags_row.len();
+
+        while x < width && flags_row[x] == 0 {
+            if context.mps() == 0 {
+                let next_a = self.a - qe;
+                if next_a >= 0x8000 && self.c < (next_a << 16) {
+                    self.a = next_a;
+                    x += 1;
+                    continue;
+                }
+            }
+
+            if self.decode(context) == 1 {
+                return (x, true);
+            }
+            qe = u32::from(QE_TABLE[context.index() as usize].qe);
+            x += 1;
+        }
+
+        (x, false)
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default)]
